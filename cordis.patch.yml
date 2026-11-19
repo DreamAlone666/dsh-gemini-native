@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-gemini-enhancement
+      name: dsh-gemini-enhancement
+      config: {}
