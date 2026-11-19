@@ -22,6 +22,8 @@
     "tool-prompts.js",
     "notice.js",
     "google-search.js",
+    "google-search-activity.js",
+    "google-search-sse.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

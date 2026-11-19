@@ -17,20 +17,22 @@ test('installed DSH: notice confirms the actual localized request, not selection
   const { Context } = await load('@deepseek-ai/cordis')
   const { SystemPrompt, renderPrompt } = await load('@deepseek-ai/dsh-system-prompt')
   const ctx = new Context()
-  let route
-  ctx.provide('connection', { fetch: { register(def) { route = def; return () => { route = undefined } } } })
+  const routes = new Map()
+  ctx.provide('connection', { fetch: { register(def) { routes.set(def.path, def); return () => routes.delete(def.path) } } })
   const sys = await ctx.plugin(SystemPrompt, { personaPrefix: 'You are a coding agent powered by the {{model}} model.' })
   t.after(() => sys.dispose())
   ctx.systemPrompt.variable('model', context => context.modelSelection?.model)
   const fiber = await ctx.plugin(plugin, {})
   t.after(() => fiber.dispose())
-  assert.equal(route.path, '/api/dsh-gemini-enhancement/status')
-  assert.equal(route.fetch(new Request(URL)).status, 204)
+  const path = '/api/dsh-gemini-enhancement/status'
+  const route = () => routes.get(path)
+  assert.equal(route().path, path)
+  assert.equal(route().fetch(new Request(URL)).status, 204)
   await fiber.update({ showLocalizationNotice: true })
 
   const abort = new AbortController()
   t.after(() => abort.abort())
-  const response = route.fetch(new Request(URL, { signal: abort.signal }))
+  const response = route().fetch(new Request(URL, { signal: abort.signal }))
   assert.equal(response.headers.get('content-type'), 'text/event-stream')
   const reader = response.body.getReader()
   const read = async () => {
@@ -52,7 +54,7 @@ test('installed DSH: notice confirms the actual localized request, not selection
 
   // Before a request, and for foreign signals or sessions, no positive evidence.
   const snapshot = async () => {
-    const probe = route.fetch(new Request(URL)).body.getReader()
+    const probe = route().fetch(new Request(URL)).body.getReader()
     try { return JSON.parse(new TextDecoder().decode((await probe.read()).value).slice('data: '.length)) }
     finally { await probe.cancel() }
   }

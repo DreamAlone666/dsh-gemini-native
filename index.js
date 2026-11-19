@@ -2,6 +2,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { toolPrompts } from './tool-prompts.js'
 import { localizationNotice } from './notice.js'
 import { googleSearch } from './google-search.js'
+import { googleSearchActivity } from './google-search-activity.js'
 
 export const inject = ['systemPrompt']
 
@@ -60,11 +61,13 @@ function localizeSections(presentation) {
 }
 
 export function apply(ctx, config) {
-  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId))
+  let observerFor
   let notice
+  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id)))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, matchesModelId)
-    child.effect(() => () => { notice = undefined })
+    observerFor = googleSearchActivity(child)
+    child.effect(() => () => { notice = undefined; observerFor = undefined })
   })
   ctx.on('system-prompt/assemble', async (_presentation, context, next) => {
     // Read the same captured selection the agent loop uses for this step. Do not

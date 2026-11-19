@@ -8,7 +8,15 @@ window.__ModuleLoader__.load({
     const en = {
       title: 'Model ID rules',
       enableSearch: 'Google Search for Gemini (experimental)',
-      searchHelp: 'Off by default. After saving, applies the model ID rules above to new Gemini Developer API conversation requests without restarting. Citations are not shown. Continuing after a local DSH tool call may fail on some routes.',
+      searchHelp: 'Off by default. After saving, applies the model ID rules above to new Gemini Developer API conversation requests without restarting. Actual searches appear as cards when Gemini reports them. Continuing after a local DSH tool call may fail on some routes.',
+      activityTitle: 'Google Search (Gemini)',
+      activityLive: 'Searching Google…',
+      activityCompleted: 'Search reported by Gemini',
+      activityIncomplete: 'Search completion not confirmed',
+      activityPartial: 'Some searches were not confirmed complete',
+      activityQueries: 'Search queries',
+      activitySourceCount: 'Sources',
+      activitySources: 'Sources returned by Google (links open in a new tab)',
       searchUnavailable: 'The current Host does not provide this setting.',
       showNotice: 'System prompt localization notice',
       noticeHelp: 'Show a match as soon as you select an eligible model. The notice confirms localization once a request uses it. Turning it off does not disable localization.',
@@ -31,7 +39,15 @@ window.__ModuleLoader__.load({
     const zh = {
       title: '模型 ID 规则',
       enableSearch: 'Google 原生搜索（实验）',
-      searchHelp: '默认关闭。保存后，沿用上面的模型 ID 规则，仅对后续 Gemini 原生 API 对话请求生效，无需重启。暂不显示搜索引用；部分路由可能无法在调用 DSH 本地工具后继续对话。',
+      searchHelp: '默认关闭。保存后，沿用上面的模型 ID 规则，仅对后续 Gemini 原生 API 对话请求生效，无需重启。Gemini 返回搜索证据时会显示卡片；部分路由可能无法在调用 DSH 本地工具后继续对话。',
+      activityTitle: 'Google 搜索（Gemini）',
+      activityLive: 'Google 搜索中…',
+      activityCompleted: 'Gemini 已报告搜索',
+      activityIncomplete: '未确认搜索完成',
+      activityPartial: '部分搜索未确认完成',
+      activityQueries: '搜索词',
+      activitySourceCount: '来源',
+      activitySources: 'Google 返回的来源（在新标签页打开）',
       searchUnavailable: '当前 Host 未提供此设置。',
       showNotice: '显示系统提示词汉化状态',
       noticeHelp: '切到匹配模型时显示匹配提示，确认请求使用汉化后显示已汉化。关闭此选项不影响汉化。',
@@ -223,6 +239,132 @@ window.__ModuleLoader__.load({
       }, h(GeminiMark, { label: t('source') }), h('span', null, t(localized ? 'localized' : 'matched')))
     }
 
+    const noSearchCards = []
+    const emptySearchActivity = { running: false, turns: new Map() }
+
+    function selectActivity(value, previous) {
+      const turns = new Map()
+      let running = false
+      for (const card of value.cards) {
+        if (!Number.isSafeInteger(card?.turn) || !Array.isArray(card.queries) || !Array.isArray(card.sources)) continue
+        if (card.turn === value.liveTurn) {
+          running ||= card.status === 'running'
+          continue
+        }
+        const group = turns.get(card.turn)
+        if (group) group.push(card)
+        else turns.set(card.turn, [card])
+      }
+      for (const [turn, group] of turns) {
+        const prior = previous.turns.get(turn)
+        if (prior && JSON.stringify(prior) === JSON.stringify(group)) turns.set(turn, prior)
+      }
+      return { running, turns }
+    }
+    const activityCardStyle = {
+      margin: '4px 0', padding: '6px 10px', borderRadius: 8,
+      border: '1px solid var(--dsw-alias-label-tertiary)', color: 'var(--dsw-alias-label-primary)',
+      background: 'var(--dsw-alias-bg-base)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere',
+    }
+
+    function safeSourceURL(raw) {
+      try {
+        const url = new URL(raw)
+        if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) return url.href
+      } catch { /* Untrusted provider data. */ }
+    }
+
+    function GoogleSearchCard({ cards, t }) {
+      const complete = cards.some(card => card.status === 'completed')
+      const unconfirmed = cards.some(card => card.status !== 'completed')
+      const status = t(unconfirmed ? (complete ? 'activityPartial' : 'activityIncomplete') : 'activityCompleted')
+      const queries = [...new Set(cards.flatMap(card => card.queries))].slice(0, 12)
+      const links = new Map()
+      for (const { sources } of cards) for (const source of sources) {
+        const href = safeSourceURL(source?.url)
+        if (!href || links.has(href) || links.size >= 8) continue
+        const host = new URL(href).hostname
+        links.set(href, { href, host, title: source.title || host })
+      }
+      const sources = [...links.values()]
+      const counts = [queries.length && `${t('activityQueries')} ${queries.length}`, sources.length && `${t('activitySourceCount')} ${sources.length}`].filter(Boolean)
+      const subtitle = [status, ...counts].join(' · ')
+      const summary = h(React.Fragment, null,
+        h('span', { style: { fontWeight: 600 } }, t('activityTitle')),
+        h('span', { style: { ...secondary, marginInlineStart: 8 } }, subtitle))
+      if (!queries.length && !sources.length) return h('div', { style: activityCardStyle }, summary)
+      const list = { marginBlock: '2px 6px', paddingInlineStart: 20 }
+      return h('details', { style: activityCardStyle },
+        h('summary', { style: { cursor: 'pointer' } }, summary),
+        queries.length > 0 && h('div', null, h('span', { style: secondary }, t('activityQueries')),
+          h('ul', { style: list }, queries.map(query => h('li', { key: query }, query)))),
+        sources.length > 0 && h('div', null, h('span', { style: secondary }, t('activitySources')),
+          h('ul', { style: list }, sources.map(source => h('li', { key: source.href },
+            h('a', { href: source.href, target: '_blank', rel: 'noopener noreferrer', style: { color: 'inherit' } }, source.title),
+            source.host !== source.title && h('span', { style: { ...secondary, marginInlineStart: 8 } }, source.host))))))
+    }
+
+    // The live composer and visible history rows share one stream per session.
+    function searchActivityHooks(ctx) {
+      const sessions = new Map()
+      function publish(entry, value) {
+        entry.value = value
+        for (const changed of entry.listeners) changed()
+      }
+      function connect(sessionId, entry) {
+        try {
+          const url = new URL('./api/dsh-gemini-enhancement/search-activity', document.baseURI)
+          if (url.origin !== window.location.origin) return
+          url.searchParams.set('sessionId', sessionId)
+          const source = new EventSource(url.href)
+          entry.source = source
+          source.onmessage = ({ data }) => {
+            try {
+              const value = JSON.parse(data)
+              if (!Array.isArray(value?.cards)) return
+              publish(entry, selectActivity(value, entry.value))
+            } catch { /* A bad presentation message must not affect chat. */ }
+          }
+          source.onerror = () => {
+            if (entry.value.running) publish(entry, { ...entry.value, running: false })
+          }
+        } catch { /* Chat remains available without the presentation route. */ }
+      }
+      function close(entry) {
+        if (!entry.source) return
+        entry.source.onmessage = entry.source.onerror = null
+        entry.source.close()
+      }
+      ctx.effect(() => () => {
+        for (const entry of sessions.values()) close(entry)
+        sessions.clear()
+      })
+      return function useSearchActivity(sessionId, turn) {
+        const get = React.useCallback(() => {
+          const value = sessions.get(sessionId)?.value ?? emptySearchActivity
+          return turn === undefined ? value.running : value.turns.get(turn) ?? noSearchCards
+        }, [sessionId, turn])
+        const subscribe = React.useCallback(listener => {
+          if (!sessionId) return () => {}
+          let entry = sessions.get(sessionId)
+          if (!entry) {
+            entry = { listeners: new Set(), value: emptySearchActivity }
+            sessions.set(sessionId, entry)
+            connect(sessionId, entry)
+          }
+          entry.listeners.add(listener)
+          return () => {
+            entry.listeners.delete(listener)
+            if (entry.listeners.size === 0) {
+              close(entry)
+              if (sessions.get(sessionId) === entry) sessions.delete(sessionId)
+            }
+          }
+        }, [sessionId])
+        return React.useSyncExternalStore(subscribe, get)
+      }
+    }
+
     const emptyModelStore = { subscribe: () => () => {}, getSnapshot: () => undefined }
 
     return {
@@ -231,6 +373,18 @@ window.__ModuleLoader__.load({
         const config = ctx.configForms.get(pluginId)
         const subscribe = config.subscribe.bind(config)
         const getSnapshot = config.getSnapshot.bind(config)
+        const useSearchActivity = searchActivityHooks(ctx)
+
+        function LiveSearchActivity({ sessionId, t }) {
+          if (!useSearchActivity(sessionId)) return null
+          return h('span', { role: 'status', style: { ...secondary, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
+            t('activityLive'))
+        }
+
+        function TurnSearchCards({ sessionId, turn, t }) {
+          const own = useSearchActivity(sessionId, turn)
+          return own.length ? h(GoogleSearchCard, { cards: own, t }) : null
+        }
 
         function LocalizationNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
           const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
@@ -249,6 +403,12 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config', key: `${pluginId}#${pluginId}`, locale: namespace,
         }, ({ view, form, t }) => view === 'page' ? h(ModelIdForm, { form, t }) : null))
+        ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+          name: 'conversation.composer.dock', id: `${pluginId}-search-live`, order: 3, locale: namespace,
+        }, LiveSearchActivity))
+        ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+          name: 'conversation.chat.turnTail', id: `${pluginId}-search-cards`, locale: namespace,
+        }, TurnSearchCards))
         ctx.inject(['modelDirectories'], scope => {
           const models = scope.modelDirectories
           scope.slots.inject('conversation.composer.dock', () => scope.slots.register({

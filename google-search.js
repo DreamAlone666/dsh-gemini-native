@@ -99,7 +99,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function googleSearch(ctx, config, matchesModelId) {
+export function googleSearch(ctx, config, matchesModelId, observerFor) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -116,7 +116,8 @@ export function googleSearch(ctx, config, matchesModelId) {
     const previous = globalThis.fetch
     if (typeof previous !== 'function') return
     function fetchWithSearch(input, init) {
-      const expected = active ? scope.getStore()?.url : undefined
+      const state = active ? scope.getStore() : undefined
+      const expected = state?.url
       if (expected !== undefined && typeof input === 'string' && init?.method === 'POST') {
         const url = URL.parse(input)
         if (url?.origin === expected.origin && url.pathname === expected.pathname
@@ -126,11 +127,16 @@ export function googleSearch(ctx, config, matchesModelId) {
             // Keep relay/proxy behavior, auth, attribution and cancellation. A
             // caller-supplied length is the only header invalidated by the edit.
             const headers = new Headers(init.headers)
+            let forwarded
             if (headers.has('content-length')) {
               headers.delete('content-length')
-              return previous.call(this, input, { ...init, headers, body })
-            }
-            return previous.call(this, input, { ...init, body })
+              forwarded = { ...init, headers, body }
+            } else forwarded = { ...init, body }
+            // The loop publishes attempt start before it first pulls this lazy
+            // stream. Bind once, before calling the network transport.
+            const observe = observerFor?.(state.sessionId)
+            const result = previous.call(this, input, forwarded)
+            return observe ? Promise.resolve(result).then(observe) : result
           }
         }
       }

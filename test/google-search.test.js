@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
 import { googleSearch } from '../google-search.js'
+import { searchActivityPath } from '../google-search-activity.js'
 
 const model = 'gemini-4-hydrogen'
 const baseURL = 'https://gemini.test/relay/v1beta'
@@ -138,7 +139,7 @@ test('disposal leaves a later fetch wrapper installed and disables the inner wra
 
 const installed = process.env.DSH_INSTALL_DIR
 
-test('installed DSH: Loader, actual model dispatch, SDK payload, live rules and unload', { skip: !installed }, async t => {
+test('installed DSH: Loader, actual model dispatch, SDK payload, activity and live rules', { skip: !installed, timeout: 5000 }, async t => {
   const require = createRequire(join(installed, 'package.json'))
   const load = spec => import(pathToFileURL(require.resolve(spec)).href)
   const { Context } = await load('@deepseek-ai/cordis')
@@ -171,6 +172,8 @@ test('installed DSH: Loader, actual model dispatch, SDK payload, live rules and 
     async resolve() { await new Promise(resolve => setImmediate(resolve)); return { value: 'synthetic' } },
     async readRecord() {},
   })
+  const routes = new Map()
+  ctx.provide('connection', { fetch: { register(route) { routes.set(route.path, route) } } })
   const adapter = ctx.plugin(pi, { providers: {
     gemini: { api: 'google-generative-ai', baseURL, apiKeyEnv: 'SYNTHETIC_KEY', models: [{ id: model }, { id: 'gemini-3-flash' }] },
     gateway: { api: 'google-generative-ai', baseURL: 'https://gateway.test/v1beta', apiKeyEnv: 'SYNTHETIC_KEY', models: [{ id: model }] },
@@ -191,7 +194,11 @@ test('installed DSH: Loader, actual model dispatch, SDK payload, live rules and 
     }
     assert.equal(new Headers(init.headers).get('x-goog-api-key'), 'synthetic')
     captures.set(body.contents[0].parts[0].text, { url, body })
-    const reply = { candidates: [{ content: { role: 'model', parts: [{ text: 'Mock answer, unchanged.' }] }, finishReason: 'STOP' }] }
+    const prompt = body.contents[0].parts[0].text
+    const reply = { candidates: [{
+      content: { role: 'model', parts: [{ text: 'Mock answer, unchanged.' }] }, finishReason: 'STOP',
+      ...(prompt === 'reported-search' ? { groundingMetadata: { webSearchQueries: ['offline Google query'] } } : {}),
+    }] }
     return new Response(`data: ${JSON.stringify(reply)}\r\n\r\n`, { headers: { 'content-type': 'text/event-stream' } })
   }
   globalThis.fetch = offline
@@ -237,6 +244,22 @@ test('installed DSH: Loader, actual model dispatch, SDK payload, live rules and 
     assert.equal(injected(label), false, label)
     assert.deepEqual(declarations(label), localTools, label)
   }
+  async function activities() {
+    const result = routes.get(searchActivityPath).fetch(new Request(`http://localhost${searchActivityPath}?sessionId=offline`))
+    const reader = result.body.getReader()
+    try { return JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6)) }
+    finally { await reader.cancel() }
+  }
+  const agent = { id: 'offline' }
+  const attemptId = 'offline:1'
+  ctx.emit('agent/assistant-stream', { agent, frame: { type: 'start', attemptId, turn: 5, step: 2 } })
+  assert.deepEqual(await activities(), { liveTurn: null, cards: [] })
+  await invoke('reported-search')
+  ctx.emit('agent/assistant-stream', { agent, frame: { type: 'end', attemptId } })
+  ctx.emit('session/event', { id: agent.id }, { type: 'turn/end', data: { turn: 5 } })
+  assert.deepEqual(await activities(), { liveTurn: null, cards: [{
+    id: '5:2:offline:1', turn: 5, step: 2, status: 'completed', queries: ['offline Google query'], sources: [],
+  }] })
   await update({ enableGoogleSearch: true, modelIds: [] })
   await invoke('not-matched-live')
   assert.equal(injected('not-matched-live'), false)

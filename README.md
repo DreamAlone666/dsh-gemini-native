@@ -26,7 +26,9 @@ gemini-4.*
 
 插件在 Host 进程内包装 `fetch`。只有在向本次请求挂载 `googleSearch` 时，才从请求工具列表移除 DSH 的 `web_search`，避免两种搜索同时供模型选择。`web_fetch` 和其他本地工具保留；关闭开关、切换到不匹配的模型或走非 Gemini 原生协议时，不改原有工具。与其余本地函数混用时，按 [Google GenerateContent 文档](https://aistudio.google.com/docs/tool-combination.md?generate-content=true) 加上 `includeServerSideToolInvocations`，不覆盖显式不兼容的工具模式。插件不加临时请求头、不另发模型请求，也不改 SSE 或对话记录。Google 自行决定是否搜索，搜索可能收费。
 
-**实验边界：**依赖当前 DSH、pi-ai 和 Google SDK 的发送链路；升级后应重跑集成测试。并非所有反代都支持混合工具，当前 pi-ai 也不会完整回放 Google 原生工具 parts，调用本地工具后的续轮可能失败。暂不展示 grounding 引用，不自动重试无搜索请求，也不切换供应商。若遇到不兼容，关闭搜索开关即可保留汉化。
+**聊天卡片：**只在 Gemini 实际报告 Google 搜索时显示。Gemini 返回原生工具调用时，输入框下方显示「Google 搜索中…」；轮次结束后，在这一轮末尾汇总成一张卡片，有搜索词或来源时可展开。仅返回 grounding 的网关不会显示「搜索中」。来源是 Google 返回的链接，不是回答逐句引用。卡片只在当前 Host 进程内保留（最近 48 个有记录的会话，每会话最多 12 次模型尝试），不写入聊天记录、「轨迹」或导出。
+
+**实验边界：**依赖当前 DSH、pi-ai 和 Google SDK 的发送链路；升级后应重跑集成测试。并非所有反代都会返回可观察的搜索证据或支持混合工具，当前 pi-ai 也不会完整回放 Google 原生工具 parts，调用本地工具后的续轮可能失败。不自动重试无搜索请求，也不切换供应商。若遇到不兼容，关闭搜索开关即可保留汉化。
 
 ## 可选：显示汉化提示
 
