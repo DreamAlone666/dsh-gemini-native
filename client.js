@@ -9,6 +9,13 @@ window.__ModuleLoader__.load({
       title: 'Model ID rules',
       enableSearch: 'Google Search on pi-ai routes (experimental)',
       searchHelp: 'Off by default. Applies the model ID rules above to new pi-ai Gemini Developer API conversations; cards are temporary. Explicit GenerateContent routes manage their own search mode and persist their cards.',
+      routeNativeMode: 'Gemini native history (experimental)',
+      routeNativeDefault: 'Use DSH defaults',
+      routeNativeReplay: 'Preserve native parts',
+      routeNativeSearchOnly: 'Preserve parts + Google Search when no other functions are available',
+      routeNativeMixed: 'Preserve parts + Google Search with local functions',
+      routeNativeHelp: 'Uses this provider’s existing Gemini API endpoint, key, and models. Try it in a new text chat. Unsupported settings and attachments use the standard path. Enable mixed tools only on endpoints that support them.',
+      routeNativeRefused: 'Not saved. The current setting is shown.',
       activityTitle: 'Google Search (Gemini)',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
@@ -40,6 +47,13 @@ window.__ModuleLoader__.load({
       title: '模型 ID 规则',
       enableSearch: 'pi-ai 路由的 Google 原生搜索（实验）',
       searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对后续经 pi-ai 发出的 Gemini Developer API 对话；搜索卡片只临时保留。单独配置的 GenerateContent 原生路由使用自己的搜索模式和持久卡片。',
+      routeNativeMode: 'Gemini 原生历史（实验）',
+      routeNativeDefault: '使用 DSH 默认方式',
+      routeNativeReplay: '保留原生 parts',
+      routeNativeSearchOnly: '保留 parts；没有其他函数时使用 Google 搜索',
+      routeNativeMixed: '保留 parts；混用 Google 搜索与本地函数',
+      routeNativeHelp: '复用此供应商的 Gemini API 地址、密钥和模型。请从新文本会话试用；不支持的配置和附件会走原方式。仅对明确支持混用的端点开启混用模式。',
+      routeNativeRefused: '未保存，已显示当前设置。',
       activityTitle: 'Google 搜索（Gemini）',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
@@ -374,6 +388,49 @@ window.__ModuleLoader__.load({
         const subscribe = config.subscribe.bind(config)
         const getSnapshot = config.getSnapshot.bind(config)
         const useSearchActivity = searchActivityHooks(ctx)
+        const modelsForm = ctx.configForms.get('llm-pi-ai')
+        const subscribeModels = modelsForm.subscribe.bind(modelsForm)
+        const getModels = modelsForm.getSnapshot.bind(modelsForm)
+        const nativeModeChoices = [
+          ['standard', 'routeNativeDefault'], ['off', 'routeNativeReplay'],
+          ['search-only', 'routeNativeSearchOnly'], ['mixed', 'routeNativeMixed'],
+        ]
+        const nativeT = ctx.locale.bind(namespace)
+
+        function NativeMode({ provider, configured }) {
+          const id = React.useId()
+          const settings = React.useSyncExternalStore(subscribe, getSnapshot)
+          const modelSettings = React.useSyncExternalStore(subscribeModels, getModels)
+          const [feedback, setFeedback] = React.useState(null)
+          const writing = React.useRef(false)
+          const profile = modelSettings.value?.providers?.[provider.provider]
+          if (!configured || !provider.declared || modelSettings.status !== 'ready' || profile?.api !== 'google-generative-ai'
+            || typeof profile.apiKeyEnv !== 'string' || typeof profile.baseURL !== 'string'
+            || settings.status !== 'ready' || settings.value?.modelPageRoutes == null) return null
+          const current = settings.value.modelPageRoutes[provider.provider] ?? 'standard'
+          const busy = feedback === 'saving'
+          const writable = settings.writable === true && typeof settings.revision === 'number'
+          async function change(event) {
+            if (!writable || writing.current) return
+            const value = event.target.value
+            const path = ['modelPageRoutes', provider.provider]
+            writing.current = true
+            setFeedback('saving')
+            try {
+              const ok = await config.mutate([{ op: 'set', path, value }], settings.revision)
+              setFeedback(ok ? 'saved' : 'routeNativeRefused')
+            } catch { setFeedback('failed') } finally { writing.current = false }
+          }
+          return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, paddingBlock: 8 }, 'aria-busy': busy },
+            h('label', { htmlFor: id, style: { fontWeight: 600 } }, nativeT('routeNativeMode')),
+            h('select', {
+              id, value: current, disabled: busy || !writable, onChange: change, 'aria-describedby': `${id}-help`,
+              style: { ...button, maxWidth: '100%', width: 'fit-content' },
+            }, nativeModeChoices.map(([value, label]) => h('option', { key: value, value }, nativeT(label)))),
+            h('p', { id: `${id}-help`, style: secondary }, nativeT('routeNativeHelp')),
+            feedback || !writable ? h('p', { role: 'status', style: secondary }, nativeT(feedback ?? 'readOnly')) : null,
+          )
+        }
 
         function LiveSearchActivity({ sessionId, t }) {
           if (!useSearchActivity(sessionId)) return null
@@ -405,6 +462,9 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config', key: `${pluginId}#${pluginId}`, locale: namespace,
         }, ({ view, form, t }) => view === 'page' ? h(ModelIdForm, { form, t }) : null))
+        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
+          name: 'settings.models.provider-card', key: 'llm-pi-ai',
+        }, props => h(NativeMode, { key: props.provider.provider, ...props })))
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock', id: `${pluginId}-search-live`, order: 3, locale: namespace,
         }, LiveSearchActivity))

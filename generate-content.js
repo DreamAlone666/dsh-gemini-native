@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 
 export const generateContentApi = 'google-generative-ai'
 const replayKind = 'dsh-gemini-generate-content'
-const replayVersion = 1
+const replayVersion = 2
 const nativeKeys = ['toolCall', 'toolResponse', 'executableCode', 'codeExecutionResult']
+const textRef = 1
+const nameRef = 2
+const argsRef = 4
 
 export const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 export const modelIdPattern = /^(?:models\/|tunedModels\/)?[\w.-]+$/u
@@ -32,17 +35,159 @@ export function historyFingerprint(contents, systemParts = []) {
   return createHash('sha256').update(JSON.stringify([systemParts, contents])).digest('hex')
 }
 
-export function makeReplayState(route, model, frames, callIds, outcome, prefix) {
-  return { response: {
-    kind: replayKind, version: replayVersion, route: route.identity, model, prefix, frames, callIds, outcome,
-  } }
+function replayDigest(wire) {
+  return createHash('sha256').update(wire).digest('base64url')
 }
 
-export function readNativeReplay(envelope) {
+function compactReplayFrames(frames, blocks, callIds) {
+  // The adapter emits one normalized block per nonempty text or function call.
+  // Match text by emission order (including repeats), functions by local ID.
+  // Non-matches, alternate candidates, and non-Gemini fields stay raw.
+  const textPositions = []
+  const callPositions = new Map()
+  for (const [position, block] of blocks.entries()) {
+    if (block?.type === 'text' || block?.type === 'reasoning') textPositions.push(position)
+    if (block?.type === 'tool-call' && typeof block.id === 'string') {
+      callPositions.set(block.id, callPositions.has(block.id) ? undefined : position)
+    }
+  }
+  let nextText = 0
+  let nextCall = 0
+  const refs = []
+  const compact = frames.map((frame, f) => {
+    const candidate = selectedCandidate(frame)
+    if (!Array.isArray(candidate?.content?.parts)) return frame
+    const c = frame.indexOf(candidate)
+    const parts = candidate.content.parts.map((part, p) => {
+      if (!isObject(part)) return part
+      let value = part
+      if (typeof part.text === 'string' && part.text.length) {
+        const b = textPositions[nextText++]
+        const block = blocks[b]
+        if (block?.type === (part.thought === true ? 'reasoning' : 'text') && block.text === part.text) {
+          refs.push([f, c, p, b, textRef])
+          value = { ...value, text: null }
+        }
+      }
+      if (part.functionCall !== undefined) {
+        const b = callPositions.get(callIds[nextCall++])
+        const call = part.functionCall
+        if (b !== undefined && isObject(call)) {
+          const block = blocks[b]
+          let mask = 0
+          const extra = { ...call }
+          if (Object.hasOwn(call, 'name') && typeof call.name === 'string' && call.name === block.name) {
+            extra.name = null
+            mask |= nameRef
+          }
+          if (Object.hasOwn(call, 'args') && isObject(call.args) && JSON.stringify(call.args) === block.arguments) {
+            extra.args = null
+            mask |= argsRef
+          }
+          if (mask) {
+            refs.push([f, c, p, b, mask])
+            value = { ...value, functionCall: extra }
+          }
+        }
+      }
+      return value
+    })
+    return frame.map((entry, i) => i === c ? { ...entry, content: { ...entry.content, parts } } : entry)
+  })
+  return { frames: compact, refs }
+}
+
+/**
+ * V2 stores frames minus fields identical to durable normalized blocks.
+ * References [frame, candidate, part, block, mask] restore null placeholders;
+ * a digest rejects mismatched block lists and preserves wire JSON key order.
+ * Failed/truncated attempts intentionally keep raw frames: their message may
+ * omit calls, or there may be no assistant message at all.
+ */
+export function makeReplayState(route, model, frames, callIds, outcome, prefix, normalizedBlocks) {
+  const response = { kind: replayKind, version: replayVersion, route: route.identity, model, prefix,
+    frames, callIds, outcome, refs: [] }
+  if (outcome === 'complete' && normalizedBlocks?.length) {
+    const compact = compactReplayFrames(frames, normalizedBlocks, callIds)
+    if (compact.refs.length) {
+      const wire = JSON.stringify(frames)
+      const candidate = { ...response, ...compact, digest: replayDigest(wire) }
+      // Prefer raw for small responses where the structural references and
+      // digest would themselves cost more than the duplicated normalized text.
+      if (Buffer.byteLength(JSON.stringify(candidate)) < Buffer.byteLength(JSON.stringify(response))) {
+        return { response: candidate }
+      }
+    }
+  }
+  return { response }
+}
+
+function durableIndex(value) {
+  return Number.isSafeInteger(value) && value >= 0
+}
+
+function expandReplayFrames(data, normalizedBlocks) {
+  if (!Array.isArray(normalizedBlocks) || typeof data.digest !== 'string' || data.outcome !== 'complete') return
+  const frames = [...data.frames]
+  const changed = new Map()
+  for (const ref of data.refs) {
+    if (!Array.isArray(ref) || ref.length !== 5) return
+    const [f, c, p, b, mask] = ref
+    if (![f, c, p, b].every(durableIndex) || ![textRef, nameRef, argsRef, nameRef | argsRef].includes(mask)) return
+    const block = normalizedBlocks[b]
+    if (!block) return
+    if (!changed.has(f)) {
+      const candidate = selectedCandidate(data.frames[f])
+      if (!Array.isArray(candidate?.content?.parts) || data.frames[f][c] !== candidate) return
+      const parts = [...candidate.content.parts]
+      frames[f] = [...data.frames[f]]
+      frames[f][c] = { ...candidate, content: { ...candidate.content, parts } }
+      changed.set(f, { c, parts })
+    }
+    const entry = changed.get(f)
+    if (entry.c !== c) return
+    const part = entry.parts[p]
+    if (!isObject(part)) return
+    if (mask === textRef) {
+      if (!Object.hasOwn(part, 'text') || part.text !== null || typeof block.text !== 'string'
+        || block.type !== (part.thought === true ? 'reasoning' : 'text')) return
+      entry.parts[p] = { ...part, text: block.text }
+    } else {
+      if (block.type !== 'tool-call' || !isObject(part.functionCall)) return
+      const call = { ...part.functionCall }
+      if (mask & nameRef) {
+        if (!Object.hasOwn(call, 'name') || call.name !== null || typeof block.name !== 'string') return
+        call.name = block.name
+      }
+      if (mask & argsRef) {
+        if (!Object.hasOwn(call, 'args') || call.args !== null || typeof block.arguments !== 'string') return
+        let args
+        try { args = JSON.parse(block.arguments) } catch { return }
+        if (!isObject(args)) return
+        call.args = args
+      }
+      entry.parts[p] = { ...part, functionCall: call }
+    }
+  }
+  if (replayDigest(JSON.stringify(frames)) !== data.digest) return
+  return frames
+}
+
+export function readNativeReplay(envelope, normalizedBlocks) {
   const data = envelope?.response
-  if (data?.kind !== replayKind || data.version !== replayVersion || !Array.isArray(data.frames)
-    || !Array.isArray(data.callIds)) return
-  return data
+  if (data?.kind !== replayKind || !Array.isArray(data.frames) || !Array.isArray(data.callIds)) return
+  if (data.version === 1) return data
+  if (data.version !== replayVersion || !Array.isArray(data.refs)) return
+  if (!data.refs.length && data.digest !== undefined) return
+  const { refs, digest: _digest, ...metadata } = data
+  const frames = refs.length ? expandReplayFrames(data, normalizedBlocks) : data.frames
+  return frames === undefined ? undefined : { ...metadata, frames }
+}
+
+function nativeFinishEnvelope(event) {
+  const last = event.data.stream?.at(-1)
+  if (last?.type === 'chunk' && last.chunk.type === 'finish'
+    && last.chunk.replayState?.response?.kind === replayKind) return last.chunk.replayState
 }
 
 function nativeEnvelopeOf(event) {
@@ -50,13 +195,29 @@ function nativeEnvelopeOf(event) {
     const envelope = event.data.message.source?.replayState
     if (envelope?.response?.kind === replayKind) return envelope
   } else if (event.type !== 'assistant/attempt') return
-  const last = event.data.stream?.at(-1)
-  if (last?.type === 'chunk' && last.chunk.type === 'finish'
-    && last.chunk.replayState?.response?.kind === replayKind) return last.chunk.replayState
+  return nativeFinishEnvelope(event)
 }
 
 /** Read a commitment or a settled failed attempt, not a live chunk. */
-export const nativeReplayOf = event => readNativeReplay(nativeEnvelopeOf(event))
+export function nativeReplayOf(event) {
+  const envelope = nativeEnvelopeOf(event)
+  if (!envelope) return
+  const content = event.type === 'assistant/message' ? event.data.message.content : undefined
+  const replay = readNativeReplay(envelope, content)
+  if (replay) return replay
+  // The loop duplicates the finish envelope in the compact stream. An
+  // interrupted message may have pruned blocks; read the independent durable
+  // block-end records in that case. Do not reconstruct from partial deltas.
+  const terminal = nativeFinishEnvelope(event)
+  if (!terminal) return
+  const blocks = new Map()
+  for (const record of event.data.stream) {
+    if (record.type !== 'chunk' || record.chunk.type !== 'block-end' || blocks.has(record.chunk.index)) continue
+    blocks.set(record.chunk.index, record.chunk.block)
+  }
+  return readNativeReplay(terminal, [...blocks.values()])
+}
+
 export const hasNativeReplay = event => nativeEnvelopeOf(event) !== undefined
 
 // Candidate zero may not be the first entry of a later streamed frame.
@@ -80,9 +241,12 @@ export function responseFrame(payload) {
 
 function nativeHistory(message, route, request, contents, systemParts) {
   if (request.purpose !== undefined || message.source?.provider !== request.provider || message.source?.model !== request.model) return
-  const state = readNativeReplay(message.source.replayState)
-  if (!state || state.model !== request.model || state.route !== route.identity || state.outcome !== 'complete'
-    || state.prefix !== historyFingerprint(contents, systemParts)) return
+  const envelope = message.source.replayState
+  const metadata = envelope?.response
+  if (!metadata || metadata.model !== request.model || metadata.route !== route.identity || metadata.outcome !== 'complete'
+    || metadata.prefix !== historyFingerprint(contents, systemParts)) return
+  const state = readNativeReplay(envelope, message.content)
+  if (!state) return
   const rawParts = []
   for (const frame of state.frames) {
     if (!Array.isArray(frame)) return

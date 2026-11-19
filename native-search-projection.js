@@ -22,7 +22,7 @@ const schema = { parse: cardsSchema }
 
 export const nativeSearchProjection = {
   key: nativeSearchProjectionKey,
-  stateVersion: 1,
+  stateVersion: 2,
   stateSchema: schema,
   init: () => ({}),
   apply(state, event) {

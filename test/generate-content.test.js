@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
 import { createGenerateContentAdapter } from '../generate-content-adapter.js'
+import { nativeReplayOf, readNativeReplay } from '../generate-content.js'
 import { nativeSearchProjection } from '../native-search-projection.js'
 
 const model = 'gemini-4-hydrogen'
@@ -20,7 +21,7 @@ const user = text => ({ role: 'user', content: [{ type: 'text', text }] })
 const result = block => ({ role: 'tool', toolCallId: block.id, content: [{ type: 'text', text: 'done' }] })
 const query = 'DSH test query'
 const parts = [
-  { text: 'I will check.', thoughtSignature: 'signature-1', futureField: { preserved: true } },
+  { text: 'I will check. '.repeat(40), thoughtSignature: 'signature-1', futureField: { preserved: true } },
   { toolCall: { id: 'google-1', toolType: 'GOOGLE_SEARCH_WEB', args: { queries: [query] } }, thoughtSignature: 'signature-2' },
   { toolResponse: { id: 'google-1', toolType: 'GOOGLE_SEARCH_WEB', response: { sources: [{ uri: 'https://example.org/article', title: 'Example' }] } }, thoughtSignature: 'signature-3' },
   { opaquePart: ['unknown kind is still ordered'] },
@@ -72,9 +73,11 @@ test('two opt-in routes share the wire implementation; raw frames and parts surv
   assert.deepEqual(declarations(requests[0].body), ['read_mock', 'web_fetch'])
   assert.ok(requests[0].body.tools.some(tool => tool.googleSearch))
   assert.equal(requests[0].body.toolConfig.includeServerSideToolInvocations, true)
-  assert.deepEqual(finish.replayState.response.frames.map(frame => frame[0].content.parts), [parts.slice(0, 2), parts.slice(2)])
   assert.ok(!JSON.stringify(finish.replayState).includes('mock-NATIVE_KEY'))
   const content = chunks.flatMap(chunk => chunk.type === 'block-end' ? [chunk.block] : [])
+  assert.ok(finish.replayState.response.refs.length > 0)
+  assert.ok(!JSON.stringify(finish.replayState).includes(parts[0].text))
+  assert.deepEqual(readNativeReplay(finish.replayState, content).frames.map(frame => frame[0].content.parts), [parts.slice(0, 2), parts.slice(2)])
   const calls = content.filter(block => block.type === 'tool-call')
   assert.deepEqual(calls.map(call => call.name), ['read_mock'])
   const assistant = { role: 'assistant', content, source: { kind: 'model', provider: 'native', model,
@@ -191,7 +194,8 @@ test('installed DSH runs one local function, persists native parts, and rebuilds
   try {
     const record = await stored.read()
     const event = record.events.find(event => event.type === 'assistant/message')
-    assert.deepEqual(event.data.message.source.replayState.response.frames.flatMap(frame => frame[0].content.parts), parts)
+    assert.ok(event.data.message.source.replayState.response.refs.length > 0)
+    assert.deepEqual(nativeReplayOf(event).frames.flatMap(frame => frame[0].content.parts), parts)
     const session = fresh.sessions.prepare(agent.id, { meta: record.header, seed: record.events })
     assert.deepEqual(fresh.sessionProjections.snapshot(session).values[nativeSearchProjection.key], { 1: searchSummary })
     const dispose = fresh.sessions.enter(session)

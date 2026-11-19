@@ -105,6 +105,7 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
 
     const prefix = historyFingerprint(payload.contents, payload.systemInstruction?.parts)
     const frames = []
+    const normalizedBlocks = []
     const callIds = []
     const batches = []
     let savedBytes = 0
@@ -170,7 +171,9 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
             if (typeof part.text === 'string' && part.text.length) {
               const reasoning = part.thought === true
               const type = reasoning ? 'reasoning' : 'text'
-              yield* fullBlock(index++, { type, text: part.text }, { type: reasoning ? 'reasoning-delta' : 'text-delta', text: part.text })
+              const block = { type, text: part.text }
+              normalizedBlocks.push(block)
+              yield* fullBlock(index++, block, { type: reasoning ? 'reasoning-delta' : 'text-delta', text: part.text })
             }
             if (part.functionCall !== undefined) {
               const call = part.functionCall
@@ -183,8 +186,9 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
               const id = randomUUID()
               callIds.push(id)
               const args = JSON.stringify(call.args ?? {})
-              yield* fullBlock(index++, { type: 'tool-call', id, name: call.name, arguments: args },
-                { type: 'tool-call-delta', id, name: call.name, argumentsDelta: args })
+              const block = { type: 'tool-call', id, name: call.name, arguments: args }
+              normalizedBlocks.push(block)
+              yield* fullBlock(index++, block, { type: 'tool-call-delta', id, name: call.name, argumentsDelta: args })
             }
           }
           if (candidate.finishReason && candidate.finishReason !== 'FINISH_REASON_UNSPECIFIED') {
@@ -208,7 +212,7 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
         throw new StreamFailure('EMPTY_RESPONSE', 'GenerateContent completed without response parts')
       }
       yield { type: 'finish', reason: { kind: finishReason === 'MAX_TOKENS' ? 'max-tokens' : callIds.length ? 'tool-calls' : 'stop' },
-        replayState: makeReplayState(route, request.model, frames, callIds, finishReason === 'MAX_TOKENS' ? 'truncated' : 'complete', prefix) }
+        replayState: makeReplayState(route, request.model, frames, callIds, finishReason === 'MAX_TOKENS' ? 'truncated' : 'complete', prefix, normalizedBlocks) }
     } catch (error) {
       const chunk = request.signal?.aborted ? failure('ABORTED', 'GenerateContent request cancelled')
         : idle.signal.aborted ? failure('TIMEOUT', 'GenerateContent stream idle timeout')

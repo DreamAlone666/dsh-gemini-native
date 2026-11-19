@@ -6,6 +6,7 @@ import { googleSearchActivity } from './google-search-activity.js'
 import { createGenerateContentAdapter } from './generate-content-adapter.js'
 import { generateContentApi, hasNativeReplay, modelIdPattern } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
+import { modelPageNative } from './model-page-native.js'
 
 export const inject = ['systemPrompt']
 
@@ -30,6 +31,8 @@ const nativeRoute = Schema.object({
 export const Config = Schema.object({
   generateContentRoutes: Schema.dict(nativeRoute).default({})
     .description('Opt-in GenerateContent routes with ordered native parts replay. Use provider IDs not already registered by DSH.'),
+  modelPageRoutes: Schema.dict(Schema.union(['standard', 'off', 'search-only', 'mixed'])).default({})
+    .description('Experimental native mode for existing custom Gemini API routes. Does not store credentials or routes.').volatile(),
   // The DSH Settings service only exposes volatile fields to Web forms.
   modelIds: Schema.array(Schema.string().required().pattern(/^[^\s*]+\*?$/u))
     .default(defaultModelIds)
@@ -81,23 +84,29 @@ function localizeSections(presentation) {
   return changed ? { ...presentation, sections } : presentation
 }
 
+function mountedLlm(ctx) {
+  for (const id of ['include:llm', 'llm']) {
+    try {
+      const module = ctx.loader?.resolve(id)?.moduleNamespace
+      if (typeof module?.isAgentLoopRequest === 'function') return module
+    } catch { /* The active Loader may use the other entry ID. */ }
+  }
+}
+
 export function apply(ctx, config) {
   let observerFor
   let notice
   const providers = Object.keys(config.generateContentRoutes ?? {})
+  const reportFor = sessionId => observerFor?.reportFor(sessionId, true)
   if (providers.length) ctx.inject?.(['llm', 'credentials'], child => {
-    let attribution
-    for (const id of ['include:llm', 'llm']) {
-      try { attribution = child.loader?.resolve(id)?.moduleNamespace?.attributionHeaders?.() } catch { /* No loader for direct mounts. */ }
-      if (attribution) break
-    }
     const adapter = createGenerateContentAdapter(config.generateContentRoutes, {
       resolveCredential: async reference => (await child.credentials.resolve(reference))?.value,
-      attribution,
-      reportFor: sessionId => observerFor?.reportFor(sessionId, true),
+      attribution: mountedLlm(child)?.attributionHeaders?.(),
+      reportFor,
     })
     child.llm.registerAdapter(providers, adapter)
   })
+  ctx.inject?.(['llm', 'loader', 'settings', 'credentials'], child => modelPageNative(child, config, mountedLlm, reportFor))
   ctx.inject?.(['sessionProjections'], child => {
     child.effect(async () => {
       const handle = await child.sessionProjections.register(nativeSearchProjection)
