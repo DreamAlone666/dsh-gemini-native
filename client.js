@@ -7,8 +7,8 @@ window.__ModuleLoader__.load({
     const pluginId = 'dsh-gemini-enhancement'
     const en = {
       title: 'Model ID rules',
-      enableSearch: 'Google Search for Gemini (experimental)',
-      searchHelp: 'Off by default. After saving, applies the model ID rules above to new Gemini Developer API conversation requests without restarting. Actual searches appear as cards when Gemini reports them. Continuing after a local DSH tool call may fail on some routes.',
+      enableSearch: 'Google Search on pi-ai routes (experimental)',
+      searchHelp: 'Off by default. Applies the model ID rules above to new pi-ai Gemini Developer API conversations; cards are temporary. Explicit GenerateContent routes manage their own search mode and persist their cards.',
       activityTitle: 'Google Search (Gemini)',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
@@ -38,8 +38,8 @@ window.__ModuleLoader__.load({
     }
     const zh = {
       title: '模型 ID 规则',
-      enableSearch: 'Google 原生搜索（实验）',
-      searchHelp: '默认关闭。保存后，沿用上面的模型 ID 规则，仅对后续 Gemini 原生 API 对话请求生效，无需重启。Gemini 返回搜索证据时会显示卡片；部分路由可能无法在调用 DSH 本地工具后继续对话。',
+      enableSearch: 'pi-ai 路由的 Google 原生搜索（实验）',
+      searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对后续经 pi-ai 发出的 Gemini Developer API 对话；搜索卡片只临时保留。单独配置的 GenerateContent 原生路由使用自己的搜索模式和持久卡片。',
       activityTitle: 'Google 搜索（Gemini）',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
@@ -381,9 +381,11 @@ window.__ModuleLoader__.load({
             t('activityLive'))
         }
 
-        function TurnSearchCards({ sessionId, turn, t }) {
-          const own = useSearchActivity(sessionId, turn)
-          return own.length ? h(GoogleSearchCard, { cards: own, t }) : null
+        function TurnSearchCards({ sessionId, turn, t, useProjection }) {
+          const durable = useProjection('geminiNativeSearchActivity', value => value?.[turn.turn] ?? noSearchCards)
+          const temporary = useSearchActivity(sessionId, turn)
+          const cards = durable.length ? [...durable, ...temporary] : temporary
+          return cards.length ? h(GoogleSearchCard, { cards, t }) : null
         }
 
         function LocalizationNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {

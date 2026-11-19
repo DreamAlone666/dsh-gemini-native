@@ -33,9 +33,11 @@ export function googleSearchActivity(ctx) {
     if (attempt === undefined || attempt.attemptId !== attemptId) return
     attempts.delete(sessionId)
     const view = views.get(sessionId)
-    if (!view?.cards.some(card => card.id === attempt.id && card.status === 'running')) return
-    publish(sessionId, { ...view, cards: view.cards.map(card => card.id === attempt.id
-      ? { ...card, status: 'incomplete' } : card) })
+    if (!view?.cards.some(card => card.id === attempt.id && (attempt.liveOnly || card.status === 'running'))) return
+    const cards = attempt.liveOnly ? view.cards.filter(card => card.id !== attempt.id)
+      : view.cards.map(card => card.id === attempt.id && card.status === 'running'
+        ? { ...card, status: 'incomplete' } : card)
+    publish(sessionId, { ...view, cards })
   }
 
   function endTurn(sessionId, turn) {
@@ -104,29 +106,36 @@ export function googleSearchActivity(ctx) {
     watchers.clear()
   })
 
-  return function observerFor(sessionId) {
+  function reportFor(sessionId, liveOnly = false) {
     const attempt = attempts.get(sessionId)
     if (!attempt) return undefined
-    return response => {
-      if (attempts.get(sessionId) !== attempt) return response
-      try {
-        return observeGoogleSearchResponse(response, report => {
-          if (attempts.get(sessionId) !== attempt) return
-          const { id, turn, step } = attempt
-          const view = views.get(sessionId) ?? empty
-          const previous = view.cards.find(card => card.id === id)
-          const card = {
-            id, turn, step,
-            status: report.status,
-            // An SDK retry can produce another response for the same Agent attempt.
-            queries: [...new Set([...(previous?.queries ?? []), ...report.queries])].slice(0, 12),
-            sources: [...new Map([...(previous?.sources ?? []), ...report.sources].map(source => [source.url, source])).values()].slice(0, 8),
-          }
-          if (previous && JSON.stringify(previous) === JSON.stringify(card)) return
-          const cards = previous ? view.cards.map(item => item === previous ? card : item) : [...view.cards, card].slice(-cardLimit)
-          publish(sessionId, { liveTurn: turn, cards })
-        })
-      } catch { return response }
+    attempt.liveOnly = liveOnly
+    return report => {
+      if (attempts.get(sessionId) !== attempt) return
+      const { id, turn, step } = attempt
+      const view = views.get(sessionId) ?? empty
+      const previous = view.cards.find(card => card.id === id)
+      const card = {
+        id, turn, step,
+        status: report.status,
+        // An SDK retry can produce another response for the same Agent attempt.
+        queries: [...new Set([...(previous?.queries ?? []), ...report.queries])].slice(0, 12),
+        sources: [...new Map([...(previous?.sources ?? []), ...report.sources].map(source => [source.url, source])).values()].slice(0, 8),
+      }
+      if (previous && JSON.stringify(previous) === JSON.stringify(card)) return
+      const cards = previous ? view.cards.map(item => item === previous ? card : item) : [...view.cards, card].slice(-cardLimit)
+      publish(sessionId, { liveTurn: turn, cards })
     }
   }
+
+  function observerFor(sessionId) {
+    const attempt = attempts.get(sessionId)
+    const report = reportFor(sessionId)
+    if (!report) return undefined
+    return response => {
+      if (attempts.get(sessionId) !== attempt) return response
+      try { return observeGoogleSearchResponse(response, report) } catch { return response }
+    }
+  }
+  return Object.assign(observerFor, { reportFor })
 }

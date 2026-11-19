@@ -99,7 +99,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function googleSearch(ctx, config, matchesModelId, observerFor) {
+export function googleSearch(ctx, config, matchesModelId, observerFor, ownRoutes = []) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -151,7 +151,7 @@ export function googleSearch(ctx, config, matchesModelId, observerFor) {
 
   ctx.on('llm/stream', (request, next) => {
     let state
-    if (active && config.enableGoogleSearch.get() && request.purpose === undefined
+    if (active && !ownRoutes.includes(request.provider) && config.enableGoogleSearch.get() && request.purpose === undefined
       && matchesModelId(request.model, config.modelIds.get())) {
       // Use the mounted LLM module's identity predicate, not a second import
       // whose marker WeakSet might belong to a different module generation.

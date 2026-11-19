@@ -26,7 +26,7 @@ function isGoogleSearch(tool) {
   return tool?.toolType === 'GOOGLE_SEARCH_WEB' || tool?.toolType === 'GOOGLE_SEARCH'
 }
 
-function collectEvidence(report) {
+export function collectGoogleSearchEvidence(report) {
   const queries = new Set()
   const sources = new Map()
   const pending = new Set()
@@ -142,7 +142,7 @@ function collectEvidence(report) {
   }
 }
 
-function sseObserver(observe) {
+export function createSseDecoder(observe, { frameLimit = maxFrameBytes, invalid = () => {} } = {}) {
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
   const bom = [0xef, 0xbb, 0xbf]
   let bomMatched = 0
@@ -154,9 +154,9 @@ function sseObserver(observe) {
   let afterCR = false
 
   function append(byte) {
-    if (used === maxFrameBytes) oversized = true
+    if (used === frameLimit) oversized = true
     if (!oversized) {
-      frame ??= new Uint8Array(maxFrameBytes)
+      frame ??= new Uint8Array(frameLimit)
       frame[used++] = byte
     }
   }
@@ -167,7 +167,9 @@ function sseObserver(observe) {
       lineHasBytes = false
       return
     }
-    if (!oversized && used) {
+    if (oversized) invalid('frame-limit')
+    else if (used) {
+      let payload
       try {
         const data = []
         for (const line of decoder.decode(frame.subarray(0, used)).split('\n')) {
@@ -175,14 +177,15 @@ function sseObserver(observe) {
           else if (line.startsWith('data:')) data.push(line.slice(line[5] === ' ' ? 6 : 5))
         }
         const json = data.join('\n')
-        if (json && json !== '[DONE]') observe(JSON.parse(json))
-      } catch { /* A malformed event is not a provider stream error. */ }
+        if (json && json !== '[DONE]') payload = JSON.parse(json)
+      } catch { invalid('invalid-frame') }
+      if (payload !== undefined) observe(payload)
     }
     used = 0
     oversized = false
   }
 
-  return function inspect(chunk) {
+  function push(chunk) {
     if (!(chunk instanceof Uint8Array)) return
     for (const byte of chunk) {
       if (atStart) {
@@ -209,13 +212,20 @@ function sseObserver(observe) {
       }
     }
   }
+
+  return {
+    push,
+    end() {
+      if ((atStart && bomMatched) || lineHasBytes || used || oversized) invalid('incomplete-frame')
+    },
+  }
 }
 
 export function observeGoogleSearchResponse(response, report) {
   if (!(response instanceof Response) || !response.ok || !response.body || response.bodyUsed || response.body.locked
     || response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'text/event-stream') return response
 
-  const inspect = sseObserver(collectEvidence(report))
+  const inspect = createSseDecoder(collectGoogleSearchEvidence(report)).push
   const reader = response.body.getReader()
   let cancelled = false
   // One upstream read per downstream demand; no separately buffered branch.

@@ -24,6 +24,9 @@
     "google-search.js",
     "google-search-activity.js",
     "google-search-sse.js",
+    "generate-content.js",
+    "generate-content-adapter.js",
+    "native-search-projection.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

@@ -3,12 +3,33 @@ import { toolPrompts } from './tool-prompts.js'
 import { localizationNotice } from './notice.js'
 import { googleSearch } from './google-search.js'
 import { googleSearchActivity } from './google-search-activity.js'
+import { createGenerateContentAdapter } from './generate-content-adapter.js'
+import { generateContentApi, hasNativeReplay, modelIdPattern } from './generate-content.js'
+import { nativeSearchProjection } from './native-search-projection.js'
 
 export const inject = ['systemPrompt']
 
 const defaultModelIds = ['gemini-4', 'gemini-4-*', 'gemini-4.*']
+const nativeModel = Schema.object({
+  id: Schema.string().required().pattern(modelIdPattern),
+  name: Schema.string().min(1),
+  contextWindow: Schema.natural().min(1),
+  maxTokens: Schema.natural().min(1),
+  thinkingLevels: Schema.array(Schema.union(['minimal', 'low', 'medium', 'high'])).default([]),
+})
+const nativeRoute = Schema.object({
+  api: Schema.const(generateContentApi).required(),
+  displayName: Schema.string().min(1),
+  baseURL: Schema.string().required(),
+  apiKeyEnv: Schema.string().required().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/u),
+  search: Schema.union(['off', 'search-only', 'mixed']).default('off'),
+  streamIdleTimeoutMs: Schema.natural().min(1).max(2_147_483_647).default(300_000),
+  models: Schema.array(nativeModel).min(1).required(),
+})
 
 export const Config = Schema.object({
+  generateContentRoutes: Schema.dict(nativeRoute).default({})
+    .description('Opt-in GenerateContent routes with ordered native parts replay. Use provider IDs not already registered by DSH.'),
   // The DSH Settings service only exposes volatile fields to Web forms.
   modelIds: Schema.array(Schema.string().required().pattern(/^[^\s*]+\*?$/u))
     .default(defaultModelIds)
@@ -63,7 +84,39 @@ function localizeSections(presentation) {
 export function apply(ctx, config) {
   let observerFor
   let notice
-  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id)))
+  const providers = Object.keys(config.generateContentRoutes ?? {})
+  if (providers.length) ctx.inject?.(['llm', 'credentials'], child => {
+    let attribution
+    for (const id of ['include:llm', 'llm']) {
+      try { attribution = child.loader?.resolve(id)?.moduleNamespace?.attributionHeaders?.() } catch { /* No loader for direct mounts. */ }
+      if (attribution) break
+    }
+    const adapter = createGenerateContentAdapter(config.generateContentRoutes, {
+      resolveCredential: async reference => (await child.credentials.resolve(reference))?.value,
+      attribution,
+      reportFor: sessionId => observerFor?.reportFor(sessionId, true),
+    })
+    child.llm.registerAdapter(providers, adapter)
+  })
+  ctx.inject?.(['sessionProjections'], child => {
+    child.effect(async () => {
+      const handle = await child.sessionProjections.register(nativeSearchProjection)
+      return () => handle.dispose()
+    })
+  })
+  ctx.inject?.(['sessionLogDeepSeek', 'sessions'], child => {
+    const checked = new WeakMap()
+    child.sessionLogDeepSeek.registerExclusion(({ sessionId }) => {
+      const session = child.sessions.get(sessionId)
+      if (!session) return false
+      const previous = checked.get(session)
+      if (previous?.native) return true
+      const native = session.snapshotEvents(previous?.cursor ?? 0).some(hasNativeReplay)
+      checked.set(session, { cursor: session.seq, native })
+      return native
+    })
+  })
+  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id), providers))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, matchesModelId)
     observerFor = googleSearchActivity(child)

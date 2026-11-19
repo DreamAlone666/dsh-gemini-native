@@ -30,6 +30,35 @@ gemini-4.*
 
 **实验边界：**依赖当前 DSH、pi-ai 和 Google SDK 的发送链路；升级后应重跑集成测试。并非所有反代都会返回可观察的搜索证据或支持混合工具，当前 pi-ai 也不会完整回放 Google 原生工具 parts，调用本地工具后的续轮可能失败。不自动重试无搜索请求，也不切换供应商。若遇到不兼容，关闭搜索开关即可保留汉化。
 
+## 可选：GenerateContent 多上游原生路由（原型）
+
+原生 Adapter 和上面的 pi-ai 开关是两条独立路径。默认不注册新路由；要试用，在插件的 Host 配置中加 `generateContentRoutes`。每个键是一个**尚未被 DSH 使用的 Provider ID**，同一个 `google-generative-ai` 实现可以服务多条直连或透传路由，不需要新预设。下例仅展示配置形状，替换端点、凭据引用和实际模型 ID 后使用：
+
+```yaml
+generateContentRoutes:
+  gemini-direct-native:
+    api: google-generative-ai
+    baseURL: https://generativelanguage.googleapis.com/v1beta
+    apiKeyEnv: GEMINI_API_KEY
+    search: mixed
+    models:
+      - id: gemini-4-hydrogen
+  gemini-relay-native:
+    api: google-generative-ai
+    baseURL: https://relay.example/v1beta
+    apiKeyEnv: RELAY_GEMINI_API_KEY
+    search: off
+    models:
+      - id: gemini-4-hydrogen
+```
+
+配置变更请在新会话验证；原型不承诺会话中途更换协议或搜索策略后仍能无损回放。旧 pi-ai 路由的 Web 开关仍可独立使用，既有设置不会切换到原生 Adapter。
+
+- `search` 默认 `off`；`search-only` 只在没有其他本地函数时挂载；`mixed` 仅用于确认支持工具混用和历史循环的端点。只有本次确实挂载 `googleSearch` 时，才从发送的声明移除 `web_search`。其他路由不受影响。不要为旧历史把不同端点复用成同一个路由。
+- 原生路由直连 REST/SSE，不走旧版全局 `fetch` 包装。它在 DSH 归一化前保存每个流事件里候选的原始 `content.parts` 顺序与字段，包括签名、原生工具结果和未知字段。只有相同路由、模型、配置身份及可见历史前缀兼容时才回放；其他情形只使用 DSH 通用历史，目标端是否接受取决于其协议要求。Gemini 的服务端工具不会作为本地工具执行。
+- 聊天仍用轮尾卡片；原生路由的摘要从 Session 日志重建，重开后可读，不插入内置「轨迹」。有权读取 DSH 原始会话事件的客户端也能读到原生数据；投影只提供摘要，不添加请求认证头或凭据。插件启用时，若会话已存有原生数据，将通过 DSH 的排除钩子跳过该会话的 `dsh_session_log` 官方 API 附带上传，普通对话消息不受影响。若停用插件，请在 DSH 中关闭这项上传，再用官方模型打开曾记录过原生数据的会话。
+- 当前只验证了文本和普通本地函数调用；未实现 Vertex 认证、图片请求和流式函数参数。单个 SSE 事件最多 1 MiB、单次原生记录最多 2 MiB；超限明确失败，不把截断结果当成可回放历史。进程在 attempt 落盘前硬中断时没有可重建的记录。
+
 ## 可选：显示汉化提示
 
 插件配置里的 **显示系统提示词汉化状态** 默认关闭，不影响汉化本身。勾选并保存后，切到匹配的模型，输入框下方立即显示「已匹配系统提示词汉化规则」，不用先发消息。收到 DSH 确认当前模型的请求用了本插件汉化的提示词后，同一处改为「系统提示词已汉化」。两种状态都用镂空四角星标识来源，悬停图标或使用屏幕阅读器可得知来源是 Gemini 增强插件。不匹配或关闭开关时不显示任何内容，也不向对话添加记录。确认状态只反映本次 Host 运行期间的请求，不判断上游模型是否正常路由。
@@ -42,6 +71,6 @@ DSH 在每一步组装系统提示词时，插件只翻译同时符合已知 **�
 
 ## 开发与验证
 
-使用 `pnpm test`。设置 `DSH_INSTALL_DIR` 指向 `@deepseek-ai/dsh` 安装目录时，还会使用真实 Cordis、Settings 和 pi-ai 验证汉化、搜索载荷、并发隔离、热更新及卸载；测试用模拟网络，不发上游请求。当前基准为 DSH `0.2.2-rc.2`。升级后变更的提示词段落会保留原文，直到更新译文。
+使用 `pnpm test`。设置 `DSH_INSTALL_DIR` 指向 `@deepseek-ai/dsh` 安装目录时，还会使用真实 Cordis、Settings 和 pi-ai 验证旧路径的汉化、搜索载荷、并发隔离、热更新及卸载，并用真实 DSH Agent Loop 和临时 JSONL 日志验证新路由的工具执行、parts 回放以及冷重开后的搜索投影。测试用模拟网络，不发上游请求。当前基准为 DSH `0.2.2-rc.2`。升级后变更的提示词段落会保留原文，直到更新译文。
 
 内置英文文本取自 DeepSeek Harness 的系统提示词、Web 预设、文件引用与工具插件，采用上游 MIT 许可。
