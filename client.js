@@ -7,6 +7,9 @@ window.__ModuleLoader__.load({
     const pluginId = 'dsh-gemini-enhancement'
     const en = {
       title: 'Model ID rules',
+      enableSearch: 'Google Search for Gemini (experimental)',
+      searchHelp: 'Off by default. After saving, applies the model ID rules above to new Gemini Developer API conversation requests without restarting. Citations are not shown. Continuing after a local DSH tool call may fail on some routes.',
+      searchUnavailable: 'The current Host does not provide this setting.',
       showNotice: 'System prompt localization notice',
       noticeHelp: 'Show a match as soon as you select an eligible model. The notice confirms localization once a request uses it. Turning it off does not disable localization.',
       matched: 'System prompt localization matched',
@@ -20,12 +23,16 @@ window.__ModuleLoader__.load({
       save: 'Save',
       saving: 'Saving…',
       saved: 'Settings saved.',
-      failed: 'Could not confirm the save. Your draft is still here.',
-      conflict: 'These settings changed elsewhere. Copy any edits you want to keep before loading the latest settings.',
-      reload: 'Discard draft and reload',
+      refused: 'Settings were not saved. Your draft is still here.',
+      failed: 'Could not confirm the save. Check the current settings before trying again.',
+      conflict: 'These settings changed elsewhere. Copy any edits you want to keep before showing the current settings.',
+      reload: 'Discard draft and show current settings',
     }
     const zh = {
       title: '模型 ID 规则',
+      enableSearch: 'Google 原生搜索（实验）',
+      searchHelp: '默认关闭。保存后，沿用上面的模型 ID 规则，仅对后续 Gemini 原生 API 对话请求生效，无需重启。暂不显示搜索引用；部分路由可能无法在调用 DSH 本地工具后继续对话。',
+      searchUnavailable: '当前 Host 未提供此设置。',
       showNotice: '显示系统提示词汉化状态',
       noticeHelp: '切到匹配模型时显示匹配提示，确认请求使用汉化后显示已汉化。关闭此选项不影响汉化。',
       matched: '已匹配系统提示词汉化规则',
@@ -39,9 +46,10 @@ window.__ModuleLoader__.load({
       save: '保存',
       saving: '正在保存…',
       saved: '设置已保存。',
-      failed: '未能确认保存结果，草稿仍保留。',
-      conflict: '设置已在别处更改。重新载入前，请先复制你想保留的编辑内容。',
-      reload: '放弃草稿并重新载入',
+      refused: '设置未保存，草稿仍保留。',
+      failed: '未能确认保存结果，请先检查当前设置再重试。',
+      conflict: '设置已在别处更改。放弃草稿前，请先复制你想保留的编辑内容。',
+      reload: '放弃草稿并显示当前设置',
     }
 
     const secondary = { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: 1.5 }
@@ -77,20 +85,25 @@ window.__ModuleLoader__.load({
       const text = draft?.text ?? baselineText
       const baselineNotice = state.value.showLocalizationNotice === true
       const showLocalizationNotice = draft?.showLocalizationNotice ?? baselineNotice
+      const hasSearchSetting = typeof state.value.enableGoogleSearch === 'boolean'
+      const baselineSearch = state.value.enableGoogleSearch === true
+      const enableGoogleSearch = draft?.enableGoogleSearch ?? baselineSearch
       const rules = [...new Set(text.split('\n').map(line => line.trim()).filter(Boolean))]
       const invalid = rules.some(rule => !/^[^\s*]+\*?$/u.test(rule))
       const rulesChanged = rules.length !== accepted.length || rules.some((rule, i) => rule !== accepted[i])
       const noticeChanged = showLocalizationNotice !== baselineNotice
-      const changed = rulesChanged || noticeChanged
+      const searchChanged = hasSearchSetting && enableGoogleSearch !== baselineSearch
+      const changed = rulesChanged || noticeChanged || searchChanged
       const conflict = draft !== null && draft.revision !== revision && changed
       const busy = feedback?.kind === 'saving'
       const writable = state.status === 'ready' && state.writable === true
       const canSave = draft !== null && writable && changed && !invalid && !conflict && !busy
 
-      function edit(nextText, nextNotice) {
-        setDraft(nextText === baselineText && nextNotice === baselineNotice ? null : {
+      function edit(nextText, nextNotice, nextSearch) {
+        setDraft(nextText === baselineText && nextNotice === baselineNotice && nextSearch === baselineSearch ? null : {
           text: nextText,
           showLocalizationNotice: nextNotice,
+          enableGoogleSearch: nextSearch,
           revision: changed ? draft?.revision ?? revision : revision,
         })
         setFeedback(null)
@@ -105,12 +118,13 @@ window.__ModuleLoader__.load({
           const ops = []
           if (rulesChanged) ops.push({ op: 'set', path: ['modelIds'], value: rules })
           if (noticeChanged) ops.push({ op: 'set', path: ['showLocalizationNotice'], value: showLocalizationNotice })
+          if (searchChanged) ops.push({ op: 'set', path: ['enableGoogleSearch'], value: enableGoogleSearch })
           const ok = await form.mutate(ops, draft.revision)
           if (!active.current) return
           if (ok) {
             setDraft(null)
             setFeedback({ kind: 'saved' })
-          } else setFeedback({ kind: 'failed' })
+          } else setFeedback({ kind: 'refused' })
         } catch {
           if (active.current) setFeedback({ kind: 'failed' })
         } finally {
@@ -119,6 +133,7 @@ window.__ModuleLoader__.load({
       }
 
       const note = busy ? 'saving' : conflict ? 'conflict' : feedback?.kind ?? (!writable ? 'readOnly' : null)
+      const errorNote = note === 'conflict' || note === 'refused' || note === 'failed'
       return h('form', { onSubmit: save, style: panel, 'aria-busy': busy },
         h('label', { htmlFor: id, style: { fontWeight: 600 } }, t('title')),
         h('p', { id: id + '-help', style: secondary }, t('help')),
@@ -131,14 +146,25 @@ window.__ModuleLoader__.load({
             border: '1px solid var(--dsw-alias-label-tertiary)', borderRadius: 8,
             background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-primary)', font: 'inherit',
           },
-          onChange: event => edit(event.target.value, showLocalizationNotice),
+          onChange: event => edit(event.target.value, showLocalizationNotice, enableGoogleSearch),
         }),
         invalid ? h('p', { id: id + '-error', role: 'alert', style: secondary }, t('invalid')) : null,
+        hasSearchSetting ? h(React.Fragment, null,
+          h('label', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('input', {
+              type: 'checkbox', checked: enableGoogleSearch, disabled: !writable || busy,
+              'aria-describedby': id + '-search-help',
+              onChange: event => edit(text, showLocalizationNotice, event.target.checked),
+            }),
+            t('enableSearch'),
+          ),
+          h('p', { id: id + '-search-help', style: secondary }, t('searchHelp')),
+        ) : h('p', { style: secondary }, t('enableSearch'), ' — ', t('searchUnavailable')),
         h('label', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
           h('input', {
             type: 'checkbox', checked: showLocalizationNotice, disabled: !writable || busy,
             'aria-describedby': id + '-notice-help',
-            onChange: event => edit(text, event.target.checked),
+            onChange: event => edit(text, event.target.checked, enableGoogleSearch),
           }),
           t('showNotice'),
         ),
@@ -147,7 +173,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'submit', disabled: !canSave, style: canSave ? primaryButton : { ...button, opacity: 0.6, cursor: 'default' } }, t('save')),
           conflict && !busy ? h('button', { type: 'button', style: button, onClick() { setDraft(null); setFeedback(null) } }, t('reload')) : null,
         ),
-        h('p', { role: 'status', style: secondary }, note ? t(note) : null),
+        h('p', { role: 'status', style: errorNote ? { ...secondary, color: 'var(--dsw-alias-state-error-primary)' } : secondary }, note ? t(note) : null),
       )
     }
 

@@ -1,6 +1,6 @@
 # DSH Gemini Enhancement
 
-在 DeepSeek Harness 中，根据每一步实际选中的 **模型 ID**，将已知内置系统提示词替换为简体中文。不读取供应商 ID、模型展示名称、全局默认模型或上游响应的 `modelVersion`；同一个模型 ID 从不同供应商接入时行为相同。
+在 DeepSeek Harness 中，根据每一步实际选中的 **模型 ID**，将已知内置系统提示词替换为简体中文。汉化不区分供应商，也不依赖模型展示名称、全局默认模型或上游 `modelVersion`。在支持的 Gemini 原生 API 路由上，还可以用同一套模型规则开启实验性的 Google 搜索。
 
 ## 安装与配置
 
@@ -18,7 +18,15 @@ gemini-4.*
 
 - 精确 ID 区分大小写；只允许一个末尾 `*` 表示前缀匹配，不支持其他通配符语法。比如 `gemini-4-argon` 只匹配该 ID，而 `gemini-4-*` 也匹配 `gemini-4-hydrogen-preview` 等后续型号。
 - 填写 DSH 的模型 ID 字段，不要另拼供应商 ID。如果模型 ID 本身就带命名空间或是自定义别名，可将完整 ID 作为一条规则，例如 `models/gemini-4-argon` 或 `my-argon`。命名空间不会被自动移除。
-- 保存空列表时所有模型均保留原文；也可用插件的开关停用汉化。
+- 保存空列表时不汉化也不挂载搜索；也可停用整个插件。
+
+## 可选：Google 原生搜索（实验）
+
+在同一个插件配置页勾选 **Google 原生搜索（实验）** 并保存。默认关闭，与汉化状态提示独立。它复用上面的模型 ID 规则，仅对 DSH Agent Loop 通过 pi-ai 发出的 Gemini Developer API `streamGenerateContent` 对话请求生效。下一次请求采纳新配置，已发出的请求不变。无需另配供应商、修改 Base URL 或注册本地搜索工具。
+
+插件在 Host 进程内包装 `fetch`。只有在向本次请求挂载 `googleSearch` 时，才从请求工具列表移除 DSH 的 `web_search`，避免两种搜索同时供模型选择。`web_fetch` 和其他本地工具保留；关闭开关、切换到不匹配的模型或走非 Gemini 原生协议时，不改原有工具。与其余本地函数混用时，按 [Google GenerateContent 文档](https://aistudio.google.com/docs/tool-combination.md?generate-content=true) 加上 `includeServerSideToolInvocations`，不覆盖显式不兼容的工具模式。插件不加临时请求头、不另发模型请求，也不改 SSE 或对话记录。Google 自行决定是否搜索，搜索可能收费。
+
+**实验边界：**依赖当前 DSH、pi-ai 和 Google SDK 的发送链路；升级后应重跑集成测试。并非所有反代都支持混合工具，当前 pi-ai 也不会完整回放 Google 原生工具 parts，调用本地工具后的续轮可能失败。暂不展示 grounding 引用，不自动重试无搜索请求，也不切换供应商。若遇到不兼容，关闭搜索开关即可保留汉化。
 
 ## 可选：显示汉化提示
 
@@ -28,10 +36,10 @@ gemini-4.*
 
 DSH 在每一步组装系统提示词时，插件只翻译同时符合已知 **段落名和完整原文** 的段落：内置身份、Standard / Creator 的编程智能体说明、`@` 文件引用和常见工具指导。保留变量、段落顺序和工具约束。未知或已被改写的文本、完整自定义系统提示词、运行时上下文、项目指令、工具 schema 和已有会话记录保持原样。
 
-本插件不额外发送模型请求，不更改 API 请求的模型 ID 或供应商，不提供 Gemini 原生搜索，也不保证改变上游路由行为。
+本插件不更改 API 请求的模型 ID 或供应商，也不保证改变上游路由行为。已在 Web 中从本目录安装的插件，更新 Host 代码后请重启 DSH Host，再刷新页面；之后改设置无需重启。
 
 ## 开发与验证
 
-使用 `pnpm test`。设置 `DSH_INSTALL_DIR` 指向安装中的 `@deepseek-ai/dsh` 包目录时，测试也会使用真实 Cordis 和 DSH 系统提示词服务，验证挂载、切换模型、更新配置及卸载。当前基准为 DSH `0.2.2-rc.2`；升级后变更的提示词段落会保留原文，直到更新译文。
+使用 `pnpm test`。设置 `DSH_INSTALL_DIR` 指向 `@deepseek-ai/dsh` 安装目录时，还会使用真实 Cordis、Settings 和 pi-ai 验证汉化、搜索载荷、并发隔离、热更新及卸载；测试用模拟网络，不发上游请求。当前基准为 DSH `0.2.2-rc.2`。升级后变更的提示词段落会保留原文，直到更新译文。
 
 内置英文文本取自 DeepSeek Harness 的系统提示词、Web 预设、文件引用与工具插件，采用上游 MIT 许可。

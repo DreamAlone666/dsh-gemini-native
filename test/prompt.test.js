@@ -87,6 +87,8 @@ test('rejects malformed model rules and keeps the array editable by DSH Settings
   }
   assert.equal(plugin.Config.dict.modelIds.meta.volatile, true)
   assert.equal(plugin.Config.dict.showLocalizationNotice.meta.volatile, true)
+  assert.equal(plugin.Config.dict.enableGoogleSearch.meta.volatile, true)
+  assert.equal(plugin.Config({}).enableGoogleSearch.get(), false)
   assert.equal(plugin.Config({}).showLocalizationNotice.get(), false)
   assert.deepEqual(plugin.Config({}).modelIds.get(), ['gemini-4', 'gemini-4-*', 'gemini-4.*'])
 })
@@ -144,13 +146,14 @@ test('installed DSH: mount from bundle patch, render, update matches live, and u
   await settings
   const [form] = ctx.settings.describe()
   assert.equal(form.ns, row.id)
-  assert.deepEqual(form.value, { modelIds: ['gemini-4', 'gemini-4-*', 'gemini-4.*'], showLocalizationNotice: false })
+  assert.deepEqual(form.value, { modelIds: ['gemini-4', 'gemini-4-*', 'gemini-4.*'], showLocalizationNotice: false, enableGoogleSearch: false })
   const rules = [
     { op: 'set', path: ['modelIds'], value: ['my-gemini-alias'] },
     { op: 'set', path: ['showLocalizationNotice'], value: true },
+    { op: 'set', path: ['enableGoogleSearch'], value: true },
   ]
   await ctx.settings.mutate(row.id, rules, form.revision)
-  assert.deepEqual(ctx.settings.describe()[0].value, { modelIds: ['my-gemini-alias'], showLocalizationNotice: true })
+  assert.deepEqual(ctx.settings.describe()[0].value, { modelIds: ['my-gemini-alias'], showLocalizationNotice: true, enableGoogleSearch: true })
   await assert.rejects(ctx.settings.mutate(row.id, rules, form.revision), /revision/i)
   assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-4-argon'))), /^You are/u)
   assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('my-gemini-alias'))), /你是由 my-gemini-alias 模型/u)

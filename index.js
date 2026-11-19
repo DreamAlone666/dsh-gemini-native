@@ -1,6 +1,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import { toolPrompts } from './tool-prompts.js'
 import { localizationNotice } from './notice.js'
+import { googleSearch } from './google-search.js'
 
 export const inject = ['systemPrompt']
 
@@ -10,8 +11,10 @@ export const Config = Schema.object({
   // The DSH Settings service only exposes volatile fields to Web forms.
   modelIds: Schema.array(Schema.string().required().pattern(/^[^\s*]+\*?$/u))
     .default(defaultModelIds)
-    .description('Model IDs to localize. Use an exact ID or one trailing * for prefix matching. An empty list matches nothing.')
+    .description('Model IDs to localize and, if enabled on a Gemini route, ground with Google Search. Use an exact ID or a trailing *.')
     .volatile(),
+  enableGoogleSearch: Schema.boolean().default(false)
+    .description('Enable experimental native Google Search in matching Gemini conversation requests.').volatile(),
   showLocalizationNotice: Schema.boolean().default(false)
     .description('Show a composer notice only for confirmed system prompt localization.').volatile(),
 })
@@ -57,6 +60,7 @@ function localizeSections(presentation) {
 }
 
 export function apply(ctx, config) {
+  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId))
   let notice
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, matchesModelId)

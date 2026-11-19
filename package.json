@@ -2,7 +2,7 @@
   "name": "dsh-gemini-enhancement",
   "version": "0.2.3",
   "private": true,
-  "description": "Localize known DeepSeek Harness system prompt sections for Gemini 4 models.",
+  "description": "Localize known DeepSeek Harness system prompts and optionally add native Google Search to Gemini requests.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -21,6 +21,7 @@
     "client.js",
     "tool-prompts.js",
     "notice.js",
+    "google-search.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

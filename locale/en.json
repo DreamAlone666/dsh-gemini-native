@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Gemini 增强",
-    "description": "When enabled in Plugins, translates known DSH system prompt sections into Simplified Chinese on steps whose model ID matches the configured rules, regardless of provider. The Web UI lets you edit one exact model ID or trailing-* rule per line; defaults are gemini-4, gemini-4-*, and gemini-4.*. An optional composer notice for confirmed localization is off by default. Custom instructions and tool schemas stay unchanged. Makes no extra model calls and does not change routing or add search. Disable the plugin to stop localizing future steps."
+    "description": "Localizes known DSH system prompts into Simplified Chinese according to model ID rules. Optionally show a localization notice or replace DSH web search with experimental native Google Search in matching Gemini API conversation requests. Both options are off by default. The plugin does not change routing or make extra model calls."
   }
 }
