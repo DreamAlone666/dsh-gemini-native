@@ -10,12 +10,16 @@ window.__ModuleLoader__.load({
       enableSearch: 'Google Search on pi-ai routes (experimental)',
       searchHelp: 'Off by default. Applies the model ID rules above to new pi-ai Gemini Developer API conversations; cards are temporary. Explicit GenerateContent routes manage their own search mode and persist their cards.',
       routeNativeMode: 'Gemini native history (experimental)',
-      routeNativeDefault: 'Use DSH defaults',
+      routeNativeDefault: 'Keep the existing path (no native history)',
       routeNativeReplay: 'Preserve native parts',
       routeNativeSearchOnly: 'Preserve parts + Google Search when no other functions are available',
       routeNativeMixed: 'Preserve parts + Google Search with local functions',
-      routeNativeHelp: 'Uses this provider’s existing Gemini API endpoint, key, and models. Try it in a new text chat. Unsupported settings and attachments use the standard path. Enable mixed tools only on endpoints that support them.',
-      routeNativeRefused: 'Not saved. The current setting is shown.',
+      routeNativeHelp: 'Choose a mode for an existing custom Gemini API provider from Settings → Models. Candidates are not verified endpoints. Use a new text chat; unsupported requests use the existing path. Only enable mixed tools on compatible endpoints. The separate pi-ai Google Search setting is unchanged.',
+      routeNativeNone: 'No configured Gemini API candidates. Add or edit a custom provider in Settings → Models.',
+      routeNativeLoading: 'Reading providers from Settings → Models…',
+      routeNativeUnreadable: 'Cannot read model settings now. You can still turn off saved native modes.',
+      routeNativeUnavailable: 'Not currently a Gemini API candidate. You can still turn off its native mode.',
+      routeNativeDraftUnavailable: 'A provider in the draft is no longer available. Turn off its native mode or discard the draft.',
       activityTitle: 'Google Search (Gemini)',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
@@ -48,12 +52,16 @@ window.__ModuleLoader__.load({
       enableSearch: 'pi-ai 路由的 Google 原生搜索（实验）',
       searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对后续经 pi-ai 发出的 Gemini Developer API 对话；搜索卡片只临时保留。单独配置的 GenerateContent 原生路由使用自己的搜索模式和持久卡片。',
       routeNativeMode: 'Gemini 原生历史（实验）',
-      routeNativeDefault: '使用 DSH 默认方式',
+      routeNativeDefault: '沿用原路径（不保留原生历史）',
       routeNativeReplay: '保留原生 parts',
       routeNativeSearchOnly: '保留 parts；没有其他函数时使用 Google 搜索',
       routeNativeMixed: '保留 parts；混用 Google 搜索与本地函数',
-      routeNativeHelp: '复用此供应商的 Gemini API 地址、密钥和模型。请从新文本会话试用；不支持的配置和附件会走原方式。仅对明确支持混用的端点开启混用模式。',
-      routeNativeRefused: '未保存，已显示当前设置。',
+      routeNativeHelp: '先在「设置 → 模型」保存自定义 Gemini API 供应商，再在这里按供应商选模式。候选依据已保存配置，不代表端点已验证。请用新文本会话试用；不支持的请求沿用原路径。仅对已确认支持混用的端点开启混用。旧 pi-ai 搜索开关独立，不受此处影响。',
+      routeNativeNone: '没有已配置的 Gemini API 候选供应商。请先在「设置 → 模型」中添加或编辑。',
+      routeNativeLoading: '正在读取模型页中的供应商…',
+      routeNativeUnreadable: '暂时无法读取模型设置，仍可关闭已保存的原生模式。',
+      routeNativeUnavailable: '当前不是 Gemini API 候选供应商，仍可关闭原生模式。',
+      routeNativeDraftUnavailable: '草稿中的供应商已不可用。请关闭其原生模式，或放弃草稿。',
       activityTitle: 'Google 搜索（Gemini）',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
@@ -94,8 +102,26 @@ window.__ModuleLoader__.load({
       color: 'var(--dsw-alias-label-primary-foreground)',
     }
 
-    function ModelIdForm({ form, t }) {
+    const routeModes = [
+      ['standard', 'routeNativeDefault'], ['off', 'routeNativeReplay'],
+      ['search-only', 'routeNativeSearchOnly'], ['mixed', 'routeNativeMixed'],
+    ]
+    const emptyRouteModes = Object.freeze({})
+    const modeOf = (modes, provider) => Object.hasOwn(modes, provider) ? modes[provider] : 'standard'
+
+    function eligibleProfiles(snapshot) {
+      if (snapshot.status !== 'ready') return new Map()
+      return new Map(Object.entries(snapshot.value?.providers ?? {}).filter(([provider, profile]) =>
+        /^[a-z][a-z0-9-]*$/u.test(provider) && profile?.api === 'google-generative-ai'
+        && typeof profile.baseURL === 'string' && /^https?:\/\//iu.test(profile.baseURL)
+        && typeof profile.apiKeyEnv === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(profile.apiKeyEnv)
+        && Array.isArray(profile.models) && profile.models.length > 0,
+      ).map(([provider, profile]) => [provider, profile.displayName || provider]))
+    }
+
+    function ModelIdForm({ form, t, getModels, subscribeModels }) {
       const id = React.useId()
+      const models = React.useSyncExternalStore(subscribeModels, getModels)
       const [draft, setDraft] = React.useState(null)
       const [feedback, setFeedback] = React.useState(null)
       const active = React.useRef(false)
@@ -119,21 +145,31 @@ window.__ModuleLoader__.load({
       const baselineSearch = state.value.enableGoogleSearch === true
       const enableGoogleSearch = draft?.enableGoogleSearch ?? baselineSearch
       const rules = [...new Set(text.split('\n').map(line => line.trim()).filter(Boolean))]
-      const invalid = rules.some(rule => !/^[^\s*]+\*?$/u.test(rule))
-      const rulesChanged = rules.length !== accepted.length || rules.some((rule, i) => rule !== accepted[i])
+      const editedRules = text !== baselineText
+      const invalid = editedRules && rules.some(rule => !/^[^\s*]+\*?$/u.test(rule))
+      const rulesChanged = editedRules && (rules.length !== accepted.length || rules.some((rule, i) => rule !== accepted[i]))
       const noticeChanged = showLocalizationNotice !== baselineNotice
       const searchChanged = hasSearchSetting && enableGoogleSearch !== baselineSearch
-      const changed = rulesChanged || noticeChanged || searchChanged
+      const hasRouteSettings = typeof state.value.modelPageRoutes === 'object' && state.value.modelPageRoutes !== null
+      const baselineRoutes = hasRouteSettings ? state.value.modelPageRoutes : emptyRouteModes
+      const routeDraft = draft?.routes ?? emptyRouteModes
+      const candidates = eligibleProfiles(models)
+      const routes = new Set([...candidates.keys(), ...Object.keys(baselineRoutes).filter(route => baselineRoutes[route] !== 'standard'), ...Object.keys(routeDraft)])
+      const routeEdits = Object.entries(routeDraft).filter(([route, mode]) => mode !== modeOf(baselineRoutes, route))
+      const routeInvalid = routeEdits.some(([route, mode]) => mode !== 'standard' && !candidates.has(route))
+      const changed = rulesChanged || noticeChanged || searchChanged || routeEdits.length > 0
       const conflict = draft !== null && draft.revision !== revision && changed
       const busy = feedback?.kind === 'saving'
       const writable = state.status === 'ready' && state.writable === true
-      const canSave = draft !== null && writable && changed && !invalid && !conflict && !busy
+      const canSave = draft !== null && writable && changed && !invalid && !routeInvalid && !conflict && !busy
 
-      function edit(nextText, nextNotice, nextSearch) {
-        setDraft(nextText === baselineText && nextNotice === baselineNotice && nextSearch === baselineSearch ? null : {
+      function edit(nextText, nextNotice, nextSearch, nextRoutes = routeDraft) {
+        const unchangedRoutes = Object.entries(nextRoutes).every(([route, mode]) => mode === modeOf(baselineRoutes, route))
+        setDraft(nextText === baselineText && nextNotice === baselineNotice && nextSearch === baselineSearch && unchangedRoutes ? null : {
           text: nextText,
           showLocalizationNotice: nextNotice,
           enableGoogleSearch: nextSearch,
+          routes: nextRoutes,
           revision: changed ? draft?.revision ?? revision : revision,
         })
         setFeedback(null)
@@ -149,6 +185,7 @@ window.__ModuleLoader__.load({
           if (rulesChanged) ops.push({ op: 'set', path: ['modelIds'], value: rules })
           if (noticeChanged) ops.push({ op: 'set', path: ['showLocalizationNotice'], value: showLocalizationNotice })
           if (searchChanged) ops.push({ op: 'set', path: ['enableGoogleSearch'], value: enableGoogleSearch })
+          for (const [provider, mode] of routeEdits) ops.push({ op: 'set', path: ['modelPageRoutes', provider], value: mode })
           const ok = await form.mutate(ops, draft.revision)
           if (!active.current) return
           if (ok) {
@@ -190,6 +227,31 @@ window.__ModuleLoader__.load({
           ),
           h('p', { id: id + '-search-help', style: secondary }, t('searchHelp')),
         ) : h('p', { style: secondary }, t('enableSearch'), ' — ', t('searchUnavailable')),
+        hasRouteSettings ? h('fieldset', { style: { border: 0, margin: '6px 0', padding: 0, display: 'grid', gap: 8 } },
+          h('legend', { style: { fontWeight: 600, padding: 0, marginBottom: 6 } }, t('routeNativeMode')),
+          h('p', { id: id + '-routes-help', style: secondary }, t('routeNativeHelp')),
+          models.status !== 'ready' || !routes.size ? h('p', { role: 'status', style: secondary },
+            t(models.status === 'loading' ? 'routeNativeLoading' : models.status === 'ready' ? 'routeNativeNone' : 'routeNativeUnreadable')) : null,
+          routeInvalid ? h('p', { role: 'alert', style: secondary }, t('routeNativeDraftUnavailable')) : null,
+          [...routes].map((route, index) => {
+            const candidate = candidates.get(route)
+            const label = candidate && candidate !== route ? `${candidate} (${route})` : route
+            const control = `${id}-route-${index}`
+            const unavailable = candidate === undefined
+            const mismatched = unavailable && models.status === 'ready'
+            const mode = Object.hasOwn(routeDraft, route) ? routeDraft[route] : modeOf(baselineRoutes, route)
+            return h('div', { key: route, style: { display: 'grid', gap: 4 } },
+              h('label', { htmlFor: control, style: { overflowWrap: 'anywhere' } }, label),
+              h('select', {
+                id: control, value: mode, disabled: !writable || busy,
+                'aria-describedby': id + '-routes-help' + (mismatched ? ` ${control}-status` : ''),
+                style: { ...button, maxWidth: '100%', width: 'fit-content' },
+                onChange: event => edit(text, showLocalizationNotice, enableGoogleSearch, { ...routeDraft, [route]: event.target.value }),
+              }, routeModes.map(([value, key]) => h('option', { key: value, value, disabled: unavailable && value !== 'standard' }, t(key)))),
+              mismatched ? h('p', { id: control + '-status', style: secondary }, t('routeNativeUnavailable')) : null,
+            )
+          }),
+        ) : null,
         h('label', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
           h('input', {
             type: 'checkbox', checked: showLocalizationNotice, disabled: !writable || busy,
@@ -201,7 +263,7 @@ window.__ModuleLoader__.load({
         h('p', { id: id + '-notice-help', style: secondary }, t('noticeHelp')),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
           h('button', { type: 'submit', disabled: !canSave, style: canSave ? primaryButton : { ...button, opacity: 0.6, cursor: 'default' } }, t('save')),
-          conflict && !busy ? h('button', { type: 'button', style: button, onClick() { setDraft(null); setFeedback(null) } }, t('reload')) : null,
+          (conflict || routeInvalid) && !busy ? h('button', { type: 'button', style: button, onClick() { setDraft(null); setFeedback(null) } }, t('reload')) : null,
         ),
         h('p', { role: 'status', style: errorNote ? { ...secondary, color: 'var(--dsw-alias-state-error-primary)' } : secondary }, note ? t(note) : null),
       )
@@ -391,46 +453,6 @@ window.__ModuleLoader__.load({
         const modelsForm = ctx.configForms.get('llm-pi-ai')
         const subscribeModels = modelsForm.subscribe.bind(modelsForm)
         const getModels = modelsForm.getSnapshot.bind(modelsForm)
-        const nativeModeChoices = [
-          ['standard', 'routeNativeDefault'], ['off', 'routeNativeReplay'],
-          ['search-only', 'routeNativeSearchOnly'], ['mixed', 'routeNativeMixed'],
-        ]
-        const nativeT = ctx.locale.bind(namespace)
-
-        function NativeMode({ provider, configured }) {
-          const id = React.useId()
-          const settings = React.useSyncExternalStore(subscribe, getSnapshot)
-          const modelSettings = React.useSyncExternalStore(subscribeModels, getModels)
-          const [feedback, setFeedback] = React.useState(null)
-          const writing = React.useRef(false)
-          const profile = modelSettings.value?.providers?.[provider.provider]
-          if (!configured || !provider.declared || modelSettings.status !== 'ready' || profile?.api !== 'google-generative-ai'
-            || typeof profile.apiKeyEnv !== 'string' || typeof profile.baseURL !== 'string'
-            || settings.status !== 'ready' || settings.value?.modelPageRoutes == null) return null
-          const current = settings.value.modelPageRoutes[provider.provider] ?? 'standard'
-          const busy = feedback === 'saving'
-          const writable = settings.writable === true && typeof settings.revision === 'number'
-          async function change(event) {
-            if (!writable || writing.current) return
-            const value = event.target.value
-            const path = ['modelPageRoutes', provider.provider]
-            writing.current = true
-            setFeedback('saving')
-            try {
-              const ok = await config.mutate([{ op: 'set', path, value }], settings.revision)
-              setFeedback(ok ? 'saved' : 'routeNativeRefused')
-            } catch { setFeedback('failed') } finally { writing.current = false }
-          }
-          return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 5, paddingBlock: 8 }, 'aria-busy': busy },
-            h('label', { htmlFor: id, style: { fontWeight: 600 } }, nativeT('routeNativeMode')),
-            h('select', {
-              id, value: current, disabled: busy || !writable, onChange: change, 'aria-describedby': `${id}-help`,
-              style: { ...button, maxWidth: '100%', width: 'fit-content' },
-            }, nativeModeChoices.map(([value, label]) => h('option', { key: value, value }, nativeT(label)))),
-            h('p', { id: `${id}-help`, style: secondary }, nativeT('routeNativeHelp')),
-            feedback || !writable ? h('p', { role: 'status', style: secondary }, nativeT(feedback ?? 'readOnly')) : null,
-          )
-        }
 
         function LiveSearchActivity({ sessionId, t }) {
           if (!useSearchActivity(sessionId)) return null
@@ -461,10 +483,7 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.locale.register(namespace, { en, zh }))
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config', key: `${pluginId}#${pluginId}`, locale: namespace,
-        }, ({ view, form, t }) => view === 'page' ? h(ModelIdForm, { form, t }) : null))
-        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
-          name: 'settings.models.provider-card', key: 'llm-pi-ai',
-        }, props => h(NativeMode, { key: props.provider.provider, ...props })))
+        }, ({ view, form, t }) => view === 'page' ? h(ModelIdForm, { form, t, getModels, subscribeModels }) : null))
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock', id: `${pluginId}-search-live`, order: 3, locale: namespace,
         }, LiveSearchActivity))

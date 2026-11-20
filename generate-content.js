@@ -40,8 +40,9 @@ function replayDigest(wire) {
 }
 
 function compactReplayFrames(frames, blocks, callIds) {
-  // The adapter emits one normalized block per nonempty text or function call.
-  // Match text by emission order (including repeats), functions by local ID.
+  // The adapter coalesces contiguous same-kind text/reasoning parts into one
+  // normalized block (closed on type change, function call, or stream end).
+  // Match text runs by emission order (whole block or slice), functions by local ID.
   // Non-matches, alternate candidates, and non-Gemini fields stay raw.
   const textPositions = []
   const callPositions = new Map()
@@ -53,6 +54,7 @@ function compactReplayFrames(frames, blocks, callIds) {
   }
   let nextText = 0
   let nextCall = 0
+  let openText = null
   const refs = []
   const compact = frames.map((frame, f) => {
     const candidate = selectedCandidate(frame)
@@ -62,14 +64,24 @@ function compactReplayFrames(frames, blocks, callIds) {
       if (!isObject(part)) return part
       let value = part
       if (typeof part.text === 'string' && part.text.length) {
-        const b = textPositions[nextText++]
-        const block = blocks[b]
-        if (block?.type === (part.thought === true ? 'reasoning' : 'text') && block.text === part.text) {
-          refs.push([f, c, p, b, textRef])
+        const type = part.thought === true ? 'reasoning' : 'text'
+        if (openText?.type !== type) {
+          const b = textPositions[nextText++]
+          openText = { type, b, block: b === undefined ? undefined : blocks[b], offset: 0 }
+        }
+        const start = openText.offset
+        const end = start + part.text.length
+        openText.offset = end
+        if (openText.block?.type === type && typeof openText.block.text === 'string'
+          && openText.block.text.startsWith(part.text, start)) {
+          refs.push(start === 0 && end === openText.block.text.length
+            ? [f, c, p, openText.b, textRef]
+            : [f, c, p, openText.b, textRef, start, end])
           value = { ...value, text: null }
         }
       }
       if (part.functionCall !== undefined) {
+        openText = null
         const b = callPositions.get(callIds[nextCall++])
         const call = part.functionCall
         if (b !== undefined && isObject(call)) {
@@ -99,7 +111,8 @@ function compactReplayFrames(frames, blocks, callIds) {
 
 /**
  * V2 stores frames minus fields identical to durable normalized blocks.
- * References [frame, candidate, part, block, mask] restore null placeholders;
+ * References [frame, candidate, part, block, mask] (or [..., start, end] for
+ * streamed text/reasoning slices) restore null placeholders;
  * a digest rejects mismatched block lists and preserves wire JSON key order.
  * Failed/truncated attempts intentionally keep raw frames: their message may
  * omit calls, or there may be no assistant message at all.
@@ -131,9 +144,10 @@ function expandReplayFrames(data, normalizedBlocks) {
   const frames = [...data.frames]
   const changed = new Map()
   for (const ref of data.refs) {
-    if (!Array.isArray(ref) || ref.length !== 5) return
-    const [f, c, p, b, mask] = ref
+    if (!Array.isArray(ref) || (ref.length !== 5 && ref.length !== 7)) return
+    const [f, c, p, b, mask, start, end] = ref
     if (![f, c, p, b].every(durableIndex) || ![textRef, nameRef, argsRef, nameRef | argsRef].includes(mask)) return
+    if (ref.length === 7 && (mask !== textRef || !durableIndex(start) || !durableIndex(end) || start >= end)) return
     const block = normalizedBlocks[b]
     if (!block) return
     if (!changed.has(f)) {
@@ -151,7 +165,12 @@ function expandReplayFrames(data, normalizedBlocks) {
     if (mask === textRef) {
       if (!Object.hasOwn(part, 'text') || part.text !== null || typeof block.text !== 'string'
         || block.type !== (part.thought === true ? 'reasoning' : 'text')) return
-      entry.parts[p] = { ...part, text: block.text }
+      if (ref.length === 7) {
+        if (end > block.text.length) return
+        entry.parts[p] = { ...part, text: block.text.slice(start, end) }
+      } else {
+        entry.parts[p] = { ...part, text: block.text }
+      }
     } else {
       if (block.type !== 'tool-call' || !isObject(part.functionCall)) return
       const call = { ...part.functionCall }
@@ -239,6 +258,27 @@ export function responseFrame(payload) {
   })
 }
 
+function groupedTextBlocks(rawParts) {
+  const blocks = []
+  let open = null
+  for (const part of rawParts) {
+    if (typeof part.text === 'string' && part.text.length) {
+      const type = part.thought === true ? 'reasoning' : 'text'
+      if (open?.type === type) open.text += part.text
+      else {
+        open = { type, text: part.text }
+        blocks.push(open)
+      }
+    }
+    if (part.functionCall !== undefined) open = null
+  }
+  return blocks
+}
+
+function sameTextBlocks(left, right) {
+  return left.length === right.length && left.every((block, i) => block.type === right[i].type && block.text === right[i].text)
+}
+
 function nativeHistory(message, route, request, contents, systemParts) {
   if (request.purpose !== undefined || message.source?.provider !== request.provider || message.source?.model !== request.model) return
   const envelope = message.source.replayState
@@ -259,10 +299,11 @@ function nativeHistory(message, route, request, contents, systemParts) {
     }
   }
   if (!rawParts.length || (route.search !== 'mixed' && rawParts.some(part => nativeKeys.some(key => Object.hasOwn(part, key))))) return
-  const displayed = rawParts.flatMap(part => typeof part.text === 'string' && part.text.length
-    ? [{ type: part.thought === true ? 'reasoning' : 'text', text: part.text }] : [])
   const stored = message.content.filter(block => block.type === 'reasoning' || block.type === 'text')
-  if (displayed.length !== stored.length || displayed.some((block, i) => block.type !== stored[i].type || block.text !== stored[i].text)) return
+  const displayed = groupedTextBlocks(rawParts)
+  const legacyDisplayed = rawParts.flatMap(part => typeof part.text === 'string' && part.text.length
+    ? [{ type: part.thought === true ? 'reasoning' : 'text', text: part.text }] : [])
+  if (!sameTextBlocks(displayed, stored) && !sameTextBlocks(legacyDisplayed, stored)) return
   const local = message.content.filter(block => block.type === 'tool-call')
   const calls = rawParts.filter(part => part.functionCall !== undefined)
   if (local.length !== state.callIds.length || calls.length !== local.length) return

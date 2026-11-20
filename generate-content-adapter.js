@@ -111,10 +111,18 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
     let savedBytes = 0
     const rawCalls = new Set()
     let index = 0
+    let openBlock = null
     let finishReason
     let usage
     let reader
     let drained = false
+    function* closeOpenBlock() {
+      if (!openBlock) return
+      const block = { type: openBlock.type, text: openBlock.text }
+      normalizedBlocks.push(block)
+      yield { type: 'block-end', index: openBlock.index, block }
+      openBlock = null
+    }
     const report = request.purpose === undefined && request.sessionId ? reportFor?.(request.sessionId) : undefined
     const observe = report ? collectGoogleSearchEvidence(report) : undefined
     const decoder = createSseDecoder(value => { batches.push({ value }) }, {
@@ -171,9 +179,13 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
             if (typeof part.text === 'string' && part.text.length) {
               const reasoning = part.thought === true
               const type = reasoning ? 'reasoning' : 'text'
-              const block = { type, text: part.text }
-              normalizedBlocks.push(block)
-              yield* fullBlock(index++, block, { type: reasoning ? 'reasoning-delta' : 'text-delta', text: part.text })
+              if (openBlock?.type !== type) {
+                yield* closeOpenBlock()
+                openBlock = { index: index++, type, text: '' }
+                yield { type: 'block-start', index: openBlock.index, blockType: type }
+              }
+              openBlock.text += part.text
+              yield { index: openBlock.index, type: reasoning ? 'reasoning-delta' : 'text-delta', text: part.text }
             }
             if (part.functionCall !== undefined) {
               const call = part.functionCall
@@ -182,6 +194,7 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
                 || (call.id !== undefined && (typeof call.id !== 'string' || !call.id || rawCalls.has(call.id)))) {
                 throw new StreamFailure('MALFORMED_RESPONSE', 'GenerateContent returned an invalid or duplicate function call')
               }
+              yield* closeOpenBlock()
               if (call.id !== undefined) rawCalls.add(call.id)
               const id = randomUUID()
               callIds.push(id)
@@ -201,6 +214,7 @@ export function createGenerateContentAdapter(providers, { resolveCredential, att
         if (result.done) break
       }
       if (!finishReason) throw new StreamFailure('TRANSPORT', 'GenerateContent stream closed before a finish reason')
+      if (finishReason === 'STOP' || finishReason === 'MAX_TOKENS') yield* closeOpenBlock()
       if (usage) yield { type: 'usage', usage }
       if (finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
         throw new StreamFailure('MODEL_FINISH', 'GenerateContent stopped without a usable completion')

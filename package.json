@@ -49,8 +49,7 @@
         "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-model-selection",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-settings-models"
+        "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
   }

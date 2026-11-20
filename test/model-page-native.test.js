@@ -64,6 +64,7 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     await ctx.loader.create({ id: 'llm', name: llmURL })
     await ctx.loader.create({ id: 'llm-pi-ai', name: 'cordis:pi', config: { providers: {
       [routeId]: { api: 'openai-completions', baseURL, apiKeyEnv: reference, models: [{ id: model }] },
+      'second-gemini-relay': { api: 'google-generative-ai', baseURL, apiKeyEnv: reference, models: [{ id: model }] },
     } } })
     await ctx.loader.create({ id: enhancer, name: 'cordis:enhancer', config: {} })
     await ctx.loader.await()
@@ -74,7 +75,7 @@ test('real Models settings mutate the same provider to and from Gemini, without 
       await ctx.settings.mutate(ns, [{ op: 'set', path, value }], form.revision)
     }
     const setApi = value => mutate('llm-pi-ai', ['providers', routeId, 'api'], value)
-    await mutate(enhancer, ['modelPageRoutes', routeId], 'mixed')
+    const setMode = value => mutate(enhancer, ['modelPageRoutes', routeId], value)
     assert.equal(route().value.providers[routeId].api, 'openai-completions')
     assert.deepEqual(await modelCatalog(), [model])
 
@@ -90,8 +91,8 @@ test('real Models settings mutate the same provider to and from Gemini, without 
       const payload = { candidates: [{ content: { role: 'model', parts: [{ text: 'Offline Gemini', unknown: 'extra part data' }] }, finishReason: 'STOP' }] }
       return new Response(`data: ${JSON.stringify(payload)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     }
-    const prepare = async (options = {}, { loop = true } = {}) => {
-      const prepared = await ctx.llm.prepareCall({ provider: routeId, model })
+    const prepare = async (options = {}, { loop = true, provider = routeId } = {}) => {
+      const prepared = await ctx.llm.prepareCall({ provider, model })
       const request = { ...prepared.config, tools, sessionId: 'models-offline', messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }], ...options }
       if (loop) llm.markAgentLoopRequest(request)
       return prepared.stream(Object.freeze(request))
@@ -106,10 +107,15 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     assert.match(requests.at(-1).path, /chat\/completions$/u)
 
     await setApi('google-generative-ai')
+    const originalRoute = route().value.providers[routeId]
+    assert.ok(!isNative(await finish(await prepare())), 'plain Gemini API does not opt in to the plugin')
+    await setMode('mixed')
+    assert.deepEqual(route().value.providers[routeId], originalRoute)
     const debug = { profile: route().value.providers[routeId], directory: ctx.llm.listConfigurableProviders().find(row => row.provider === routeId),
       mode: ctx.settings.describe().find(row => row.ns === enhancer)?.value.modelPageRoutes, marker: typeof ctx.loader.resolve('llm').moduleNamespace?.isAgentLoopRequest }
+    const beforePreparing = requests.length
     const captured = await prepare()
-    assert.equal(requests.length, 1, 'preparing the stream has no I/O')
+    assert.equal(requests.length, beforePreparing, 'preparing the stream has no I/O')
     await setApi('openai-completions')
     const native = await finish(captured)
     assert.ok(isNative(native), `expected native finish, got ${JSON.stringify({ native, config: debug })}`)
@@ -117,6 +123,8 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     assert.equal(requests.at(-1).headers.get('x-goog-api-key'), 'offline-models-key')
     assert.equal(requests.at(-1).redirect, 'error')
     assert.deepEqual(requests.at(-1).body.tools.map(tool => tool.functionDeclarations?.map(fn => fn.name) ?? 'Google Search'), [['read_mock'], 'Google Search'])
+    assert.ok(!isNative(await finish(await prepare({}, { provider: 'second-gemini-relay' }))))
+    assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.ok(!isNative(await finish(await prepare())))
     assert.match(requests.at(-1).path, /chat\/completions$/u)
 
@@ -139,10 +147,14 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     ] }))
     assert.ok(!isNative(orphan))
     assert.notEqual(requests.at(-1).redirect, 'error')
-    await mutate(enhancer, ['modelPageRoutes', routeId], 'off')
+    await setMode('off')
     assert.ok(isNative(await finish(await prepare())))
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.ok(requests.at(-1).body.tools[0].functionDeclarations.some(tool => tool.name === 'web_search'))
+    await setMode('standard')
+    assert.ok(!isNative(await finish(await prepare())), 'plugin page can restore the normal Gemini protocol')
+    assert.deepEqual(route().value.providers[routeId], originalRoute)
+    await setMode('off')
     gatewayStatus = 400
     const count = requests.length
     assert.equal((await finish(await prepare())).reason.kind, 'error')

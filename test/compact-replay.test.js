@@ -161,3 +161,63 @@ test('projection is ordered and can decode cold interrupted events from authorit
   assert.strictEqual(apply(before, missing), before)
   assert.equal(hasNativeReplay(missing), true)
 })
+
+test('slice refs compact multi-frame streamed text/reasoning, reject bad slices, and remain compatible with legacy unmerged messages', () => {
+  const r1 = 'Thinking part one 🧪 '.repeat(12)
+  const r2 = 'Thinking part two. '.repeat(12)
+  const t1 = 'First markdown **chunk '.repeat(16)
+  const t2 = 'second markdown chunk**. '.repeat(16)
+  const t3 = 'Final tail.'
+  const streamedFrames = [
+    [selected([{ thought: true, text: r1, thoughtSignature: 'sig-r1' }])],
+    [selected([{ thought: true, text: r2, thoughtSignature: 'sig-r2' }])],
+    [selected([{ text: t1, thoughtSignature: 'sig-t1' }, { text: '', thoughtSignature: 'sig-empty' }])],
+    [selected([{ text: t2, extra: 1 }])],
+    [selected([{ text: t3 }], { finishReason: 'STOP' })],
+  ]
+  const mergedBlocks = [
+    { type: 'reasoning', text: r1 + r2 },
+    { type: 'text', text: t1 + t2 + t3 },
+  ]
+  const envelope = makeReplayState(route, model, streamedFrames, [], 'complete', prefix, mergedBlocks)
+  assert.equal(envelope.response.version, 2)
+  assert.equal(envelope.response.refs.length, 5)
+  assert.ok(envelope.response.refs.every(ref => ref.length === 7))
+  assert.ok(!JSON.stringify(envelope).includes(r1))
+  assert.ok(!JSON.stringify(envelope).includes(t2))
+  assert.equal(JSON.stringify(readNativeReplay(clone(envelope), clone(mergedBlocks)).frames), JSON.stringify(streamedFrames))
+  const replayPayload = (env, content) => makePayload({ provider: 'gemini', model, sessionId: 'offline', messages: [
+    { role: 'user', content: [{ type: 'text', text: 'Check this' }] }, message(env, content),
+    { role: 'user', content: [{ type: 'text', text: 'Follow up' }] },
+  ] }, route)
+  assert.deepEqual(
+    replayPayload(clone(envelope), clone(mergedBlocks)).contents[1].parts,
+    streamedFrames.flatMap(frame => frame[0].content.parts),
+  )
+
+  for (const mutate of [
+    ref => { ref[5] = ref[6] },
+    ref => { ref[6] = mergedBlocks[ref[3]].text.length + 1 },
+    ref => { ref[5] = -1 },
+    ref => { ref[4] = 2 },
+    ref => { ref.push(0) },
+  ]) {
+    const bad = clone(envelope)
+    mutate(bad.response.refs[0])
+    assert.equal(readNativeReplay(bad, mergedBlocks), undefined)
+  }
+
+  const legacyBlocks = [
+    { type: 'reasoning', text: r1 },
+    { type: 'reasoning', text: r2 },
+    { type: 'text', text: t1 },
+    { type: 'text', text: t2 },
+    { type: 'text', text: t3 },
+  ]
+  const legacyV1 = { response: { kind: 'dsh-gemini-generate-content', version: 1, route: route.identity, model,
+    frames: streamedFrames, callIds: [], outcome: 'complete', prefix } }
+  assert.deepEqual(
+    replayPayload(legacyV1, legacyBlocks).contents[1].parts,
+    streamedFrames.flatMap(frame => frame[0].content.parts),
+  )
+})

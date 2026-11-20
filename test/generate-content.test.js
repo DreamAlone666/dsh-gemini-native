@@ -28,7 +28,11 @@ const parts = [
   { functionCall: { id: 'read-1', name: 'read_mock', args: { path: 'a.txt' } }, thoughtSignature: 'signature-4' },
 ]
 const frame = (parts, finishReason) => ({ candidates: [{ index: 0, content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}) }] })
-const answer = frame([{ text: 'Done.' }], 'STOP')
+const answerFrames = [
+  frame([{ text: '目前 **DeepSeek Harness (`@deepseek-ai/' }]),
+  frame([{ text: 'dsh`)** 的最新版本是 **0.2.2-rc.5**' }]),
+  frame([{ text: '。' }], 'STOP'),
+]
 const streamFrames = [frame(parts.slice(0, 2)), frame(parts.slice(2), 'STOP')]
 function sse(frames) {
   const bytes = Buffer.from(frames.map(entry => `data: ${JSON.stringify(entry)}\r\n\r\n`).join(''))
@@ -54,7 +58,7 @@ function fixture() {
     const url = new URL(input)
     const body = JSON.parse(init.body)
     requests.push({ url, body, headers: new Headers(init.headers), redirect: init.redirect })
-    return sse(url.hostname === 'native.test' && body.contents.length === 1 ? streamFrames : [answer])
+    return sse(url.hostname === 'native.test' && body.contents.length === 1 ? streamFrames : answerFrames)
   }
   return { requests, transport }
 }
@@ -127,6 +131,103 @@ test('keeps alternative candidates in the record but never dispatches their func
   assert.deepEqual(chunks.at(-1).replayState.response.frames[0], [other])
 })
 
+test('coalesces streamed reasoning and text chunks into single blocks while preserving native parts and splitting on tool calls', async () => {
+  const streamedParts = [
+    { text: '先查一下 ', thought: true, thoughtSignature: 'sig-r1' },
+    { text: '最新版本号。', thought: true, thoughtSignature: 'sig-r2' },
+    { text: '目前 **DeepSeek Harness (`@deepseek-ai/', thoughtSignature: 'sig-t1' },
+    { text: '', thoughtSignature: 'sig-empty' },
+    { text: 'dsh`)** 的最新版本是 **0.2.2-rc.5**。'.repeat(12), thoughtSignature: 'sig-t2' },
+    { functionCall: { id: 'call-1', name: 'read_mock', args: { path: 'a.txt' } }, thoughtSignature: 'sig-fc' },
+    { text: '补充段落一，' },
+    { text: '补充段落二。' },
+  ]
+  const streamedFrames = [
+    frame([streamedParts[0]]),
+    frame([streamedParts[1]]),
+    frame([streamedParts[2]]),
+    frame([streamedParts[3]]),
+    frame([streamedParts[4]]),
+    frame([streamedParts[5]]),
+    frame([streamedParts[6]]),
+    frame([streamedParts[7]], 'STOP'),
+  ]
+  const requests = []
+  const transport = async (input, init) => {
+    requests.push(JSON.parse(init.body))
+    return sse(requests.length === 1 ? streamedFrames : answerFrames)
+  }
+  const adapter = createGenerateContentAdapter(routes, { fetch: transport, resolveCredential: async () => 'mock-key' })
+  const ask = user('what version?')
+  const chunks = await collect(adapter.stream(request('native', [ask])))
+  const finish = chunks.at(-1)
+  assert.equal(finish.reason.kind, 'tool-calls')
+
+  const starts = chunks.filter(chunk => chunk.type === 'block-start')
+  const ends = chunks.filter(chunk => chunk.type === 'block-end')
+  assert.deepEqual(starts, [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'block-start', index: 1, blockType: 'text' },
+    { type: 'block-start', index: 2, blockType: 'tool-call' },
+    { type: 'block-start', index: 3, blockType: 'text' },
+  ])
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'reasoning-delta').map(chunk => [chunk.index, chunk.text]), [
+    [0, '先查一下 '],
+    [0, '最新版本号。'],
+  ])
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => [chunk.index, chunk.text]), [
+    [1, streamedParts[2].text],
+    [1, streamedParts[4].text],
+    [3, '补充段落一，'],
+    [3, '补充段落二。'],
+  ])
+  const content = ends.map(chunk => chunk.block)
+  assert.equal(content.length, 4)
+  assert.deepEqual(content[0], { type: 'reasoning', text: '先查一下 最新版本号。' })
+  assert.deepEqual(content[1], { type: 'text', text: streamedParts[2].text + streamedParts[4].text })
+  assert.equal(content[2].type, 'tool-call')
+  assert.deepEqual(content[3], { type: 'text', text: '补充段落一，补充段落二。' })
+
+  assert.ok(finish.replayState.response.refs.some(ref => ref.length === 7), 'multi-frame text should compact using slice refs')
+  assert.ok(!JSON.stringify(finish.replayState).includes(streamedParts[4].text))
+  assert.deepEqual(readNativeReplay(finish.replayState, content).frames.flatMap(entry => entry[0].content.parts), streamedParts)
+
+  const assistant = { role: 'assistant', content, source: { kind: 'model', provider: 'native', model,
+    replayState: JSON.parse(JSON.stringify(finish.replayState)) } }
+  const next = await collect(adapter.stream(request('native', [ask, assistant, result(content[2])])))
+  assert.equal(next.at(-1).reason.kind, 'stop')
+  assert.deepEqual(requests[1].contents[1], { role: 'model', parts: streamedParts })
+  assert.deepEqual(next.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block), [{
+    type: 'text',
+    text: '目前 **DeepSeek Harness (`@deepseek-ai/dsh`)** 的最新版本是 **0.2.2-rc.5**。',
+  }])
+})
+
+test('MAX_TOKENS closes open streamed block cleanly while transport failure does not emit premature block-end', async () => {
+  const truncated = createGenerateContentAdapter(routes, {
+    resolveCredential: async () => 'mock-key',
+    fetch: async () => sse([frame([{ text: 'part 1 ' }]), frame([{ text: 'part 2' }], 'MAX_TOKENS')]),
+  })
+  const truncatedChunks = await collect(truncated.stream(request('native', [user('cut')])))
+  assert.equal(truncatedChunks.at(-1).reason.kind, 'max-tokens')
+  assert.deepEqual(truncatedChunks.filter(chunk => chunk.type === 'block-end').map(chunk => chunk.block), [
+    { type: 'text', text: 'part 1 part 2' },
+  ])
+  assert.equal(truncatedChunks.at(-1).replayState.response.outcome, 'truncated')
+
+  const failed = createGenerateContentAdapter(routes, {
+    resolveCredential: async () => 'mock-key',
+    fetch: async () => sse([frame([{ text: 'partial ' }]), frame([{ text: 'chunk' }])]),
+  })
+  const failedChunks = await collect(failed.stream(request('native', [user('drop')])))
+  assert.equal(failedChunks.at(-1).reason.failure.code, 'TRANSPORT')
+  assert.deepEqual(failedChunks.filter(chunk => chunk.type === 'block-end'), [])
+  assert.deepEqual(failedChunks.filter(chunk => chunk.type === 'text-delta').map(chunk => [chunk.index, chunk.text]), [
+    [0, 'partial '],
+    [0, 'chunk'],
+  ])
+})
+
 const installed = process.env.DSH_INSTALL_DIR
 const localTool = {
   ...tools[0],
@@ -193,9 +294,14 @@ test('installed DSH runs one local function, persists native parts, and rebuilds
   const stored = await fresh.sessionPersistence.open(agent.id, 'read')
   try {
     const record = await stored.read()
-    const event = record.events.find(event => event.type === 'assistant/message')
+  const events = record.events.filter(event => event.type === 'assistant/message')
+    const event = events[0]
     assert.ok(event.data.message.source.replayState.response.refs.length > 0)
     assert.deepEqual(nativeReplayOf(event).frames.flatMap(frame => frame[0].content.parts), parts)
+    assert.deepEqual(events[1].data.message.content, [{
+      type: 'text',
+      text: '目前 **DeepSeek Harness (`@deepseek-ai/dsh`)** 的最新版本是 **0.2.2-rc.5**。',
+    }])
     const session = fresh.sessions.prepare(agent.id, { meta: record.header, seed: record.events })
     assert.deepEqual(fresh.sessionProjections.snapshot(session).values[nativeSearchProjection.key], { 1: searchSummary })
     const dispose = fresh.sessions.enter(session)
