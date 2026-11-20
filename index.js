@@ -3,37 +3,17 @@ import { toolPrompts } from './tool-prompts.js'
 import { localizationNotice } from './notice.js'
 import { googleSearch } from './google-search.js'
 import { googleSearchActivity } from './google-search-activity.js'
-import { createGenerateContentAdapter } from './generate-content-adapter.js'
-import { generateContentApi, hasNativeReplay, modelIdPattern } from './generate-content.js'
+import { hasNativeReplay } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
-import { modelPageNative } from './model-page-native.js'
 
 export const inject = ['systemPrompt']
 
 const defaultModelIds = ['gemini-4', 'gemini-4-*', 'gemini-4.*']
-const nativeModel = Schema.object({
-  id: Schema.string().required().pattern(modelIdPattern),
-  name: Schema.string().min(1),
-  contextWindow: Schema.natural().min(1),
-  maxTokens: Schema.natural().min(1),
-  thinkingLevels: Schema.array(Schema.union(['minimal', 'low', 'medium', 'high'])).default([]),
-})
-const nativeRoute = Schema.object({
-  api: Schema.const(generateContentApi).required(),
-  displayName: Schema.string().min(1),
-  baseURL: Schema.string().required(),
-  apiKeyEnv: Schema.string().required().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/u),
-  search: Schema.union(['off', 'search-only', 'mixed']).default('off'),
-  streamIdleTimeoutMs: Schema.natural().min(1).max(2_147_483_647).default(300_000),
-  models: Schema.array(nativeModel).min(1).required(),
-})
 
 export const Config = Schema.object({
-  generateContentRoutes: Schema.dict(nativeRoute).default({})
-    .description('Opt-in GenerateContent routes with ordered native parts replay. Use provider IDs not already registered by DSH.'),
-  modelPageRoutes: Schema.dict(Schema.union(['standard', 'off', 'search-only', 'mixed'])).default({})
-    .description('Experimental native mode for existing custom Gemini API routes. Does not store credentials or routes.').volatile(),
   // The DSH Settings service only exposes volatile fields to Web forms.
+  modelPageRoutes: Schema.dict(Schema.union(['standard', 'off', 'search-only', 'mixed'])).default({})
+    .description('Experimental native parts replay and Google Search mode for Gemini API routes served by llm-pi-ai.').volatile(),
   modelIds: Schema.array(Schema.string().required().pattern(/^[^\s*]+\*?$/u))
     .default(defaultModelIds)
     .description('Model IDs to localize and, if enabled on a Gemini route, ground with Google Search. Use an exact ID or a trailing *.')
@@ -84,29 +64,10 @@ function localizeSections(presentation) {
   return changed ? { ...presentation, sections } : presentation
 }
 
-function mountedLlm(ctx) {
-  for (const id of ['include:llm', 'llm']) {
-    try {
-      const module = ctx.loader?.resolve(id)?.moduleNamespace
-      if (typeof module?.isAgentLoopRequest === 'function') return module
-    } catch { /* The active Loader may use the other entry ID. */ }
-  }
-}
-
 export function apply(ctx, config) {
   let observerFor
   let notice
-  const providers = Object.keys(config.generateContentRoutes ?? {})
   const reportFor = sessionId => observerFor?.reportFor(sessionId, true)
-  if (providers.length) ctx.inject?.(['llm', 'credentials'], child => {
-    const adapter = createGenerateContentAdapter(config.generateContentRoutes, {
-      resolveCredential: async reference => (await child.credentials.resolve(reference))?.value,
-      attribution: mountedLlm(child)?.attributionHeaders?.(),
-      reportFor,
-    })
-    child.llm.registerAdapter(providers, adapter)
-  })
-  ctx.inject?.(['llm', 'loader', 'settings', 'credentials'], child => modelPageNative(child, config, mountedLlm, reportFor))
   ctx.inject?.(['sessionProjections'], child => {
     child.effect(async () => {
       const handle = await child.sessionProjections.register(nativeSearchProjection)
@@ -125,7 +86,7 @@ export function apply(ctx, config) {
       return native
     })
   })
-  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id), providers))
+  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id), reportFor))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, matchesModelId)
     observerFor = googleSearchActivity(child)

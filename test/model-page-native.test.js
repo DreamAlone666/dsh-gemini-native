@@ -16,7 +16,7 @@ const reference = 'OFFLINE_GEMINI_RELAY_API_KEY'
 const enhancer = 'dsh-gemini-enhancement'
 const tools = ['read_mock', 'web_search'].map(name => ({ name, description: name, parameters: { type: 'object' } }))
 
-test('real Models settings mutate the same provider to and from Gemini, without resaving address, key, or models',
+test('real Models settings mutate the same provider to and from Gemini, reusing pi-ai for files, custom headers, and streaming',
   { skip: !installed, timeout: 7000 }, async t => {
     const require = createRequire(join(installed, 'package.json'))
     const load = spec => import(pathToFileURL(require.resolve(spec)).href)
@@ -63,7 +63,7 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     await settings
     await ctx.loader.create({ id: 'llm', name: llmURL })
     await ctx.loader.create({ id: 'llm-pi-ai', name: 'cordis:pi', config: { providers: {
-      [routeId]: { api: 'openai-completions', baseURL, apiKeyEnv: reference, models: [{ id: model }] },
+      [routeId]: { api: 'openai-completions', baseURL, apiKeyEnv: reference, headers: { 'x-relay-tag': 'pi-ai-owned' }, models: [{ id: model }] },
       'second-gemini-relay': { api: 'google-generative-ai', baseURL, apiKeyEnv: reference, models: [{ id: model }] },
     } } })
     await ctx.loader.create({ id: enhancer, name: 'cordis:enhancer', config: {} })
@@ -84,7 +84,7 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     globalThis.fetch = async (input, init) => {
       const path = new URL(input).pathname
       const headers = new Headers(init.headers)
-      requests.push({ path, headers, body: JSON.parse(init.body), redirect: init.redirect })
+      requests.push({ path, headers, body: JSON.parse(init.body) })
       if (gatewayStatus !== 200 || path.endsWith('/chat/completions')) {
         return Response.json({ error: { message: 'offline status' } }, { status: gatewayStatus === 200 ? 400 : gatewayStatus })
       }
@@ -111,17 +111,16 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     assert.ok(!isNative(await finish(await prepare())), 'plain Gemini API does not opt in to the plugin')
     await setMode('mixed')
     assert.deepEqual(route().value.providers[routeId], originalRoute)
-    const debug = { profile: route().value.providers[routeId], directory: ctx.llm.listConfigurableProviders().find(row => row.provider === routeId),
-      mode: ctx.settings.describe().find(row => row.ns === enhancer)?.value.modelPageRoutes, marker: typeof ctx.loader.resolve('llm').moduleNamespace?.isAgentLoopRequest }
     const beforePreparing = requests.length
     const captured = await prepare()
     assert.equal(requests.length, beforePreparing, 'preparing the stream has no I/O')
     await setApi('openai-completions')
     const native = await finish(captured)
-    assert.ok(isNative(native), `expected native finish, got ${JSON.stringify({ native, config: debug })}`)
+    assert.ok(isNative(native))
+    assert.equal(native.replayState.response.kind, 'pi-ai', 'keeps pi-ai replayState intact alongside native data')
     assert.match(requests.at(-1).path, /gemini-4-hydrogen:streamGenerateContent$/u)
     assert.equal(requests.at(-1).headers.get('x-goog-api-key'), 'offline-models-key')
-    assert.equal(requests.at(-1).redirect, 'error')
+    assert.equal(requests.at(-1).headers.get('x-relay-tag'), 'pi-ai-owned', 'custom headers stay handled by pi-ai')
     assert.deepEqual(requests.at(-1).body.tools.map(tool => tool.functionDeclarations?.map(fn => fn.name) ?? 'Google Search'), [['read_mock'], 'Google Search'])
     assert.ok(!isNative(await finish(await prepare({}, { provider: 'second-gemini-relay' }))))
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
@@ -135,29 +134,40 @@ test('real Models settings mutate the same provider to and from Gemini, without 
     assert.deepEqual(saved.models.map(entry => entry.id), [model])
     assert.deepEqual(await modelCatalog(), [model])
     assert.ok(!isNative(await finish(await prepare({ purpose: 'session-title' }, { loop: false }))))
-    assert.notEqual(requests.at(-1).redirect, 'error')
-    assert.ok(!isNative(await finish(await prepare({ messages: [{ role: 'user', content: [
+
+    // File attachments and orphaned tool histories now work natively via pi-ai instead of falling back!
+    const withFile = await finish(await prepare({ messages: [{ role: 'user', content: [
       { type: 'text', text: 'see attached notes' },
       { type: 'file', attachment: { attachmentId: 'offline-notes', name: 'notes.txt', bytes: 20 } },
-    ] }] }))))
-    assert.notEqual(requests.at(-1).redirect, 'error')
+    ] }] }))
+    assert.ok(isNative(withFile))
     assert.match(JSON.stringify(requests.at(-1).body), /notes\.txt/u)
+
     const orphan = await finish(await prepare({ messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }] },
       { role: 'tool', toolCallId: 'without-an-owner', content: [{ type: 'text', text: 'orphan result' }] },
     ] }))
-    assert.ok(!isNative(orphan))
-    assert.notEqual(requests.at(-1).redirect, 'error')
+    assert.ok(isNative(orphan))
+
+    await setMode('search-only')
+    assert.ok(isNative(await finish(await prepare())))
+    assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch), 'search-only does not mix with read_mock')
+    assert.ok(requests.at(-1).body.tools[0].functionDeclarations.some(tool => tool.name === 'web_search'))
+    assert.ok(isNative(await finish(await prepare({ tools: tools.filter(tool => tool.name === 'web_search') }))))
+    assert.deepEqual(requests.at(-1).body.tools, [{ googleSearch: {} }])
+
     await setMode('off')
     assert.ok(isNative(await finish(await prepare())))
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.ok(requests.at(-1).body.tools[0].functionDeclarations.some(tool => tool.name === 'web_search'))
+
     await setMode('standard')
     assert.ok(!isNative(await finish(await prepare())), 'plugin page can restore the normal Gemini protocol')
     assert.deepEqual(route().value.providers[routeId], originalRoute)
+
     await setMode('off')
     gatewayStatus = 400
     const count = requests.length
     assert.equal((await finish(await prepare())).reason.kind, 'error')
-    assert.equal(requests.length, count + 1, 'a native rejection does not re-send through pi-ai')
+    assert.equal(requests.length, count + 1)
     assert.ok(refs.every(ref => ref === reference))
   })

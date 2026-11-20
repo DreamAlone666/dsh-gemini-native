@@ -1,24 +1,20 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { collectGoogleSearchEvidence, observeSseResponse } from './google-search-sse.js'
+import {
+  applyGoogleSearchTools, attachNativeReplay, isObject, makeNativeReplayData, normalizeEndpoint,
+  patchGenerateContentBody, responseFrame, routeIdentity, selectedCandidate,
+} from './generate-content.js'
 
-const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-const hasFunctions = tool => Array.isArray(tool.functionDeclarations) && tool.functionDeclarations.length > 0
-const dshWebSearch = 'web_search'
-
-function withoutDshWebSearch(tools) {
-  return tools.flatMap(tool => {
-    if (!hasFunctions(tool)) return [tool]
-    const { functionDeclarations, ...otherFields } = tool
-    const kept = functionDeclarations.filter(declaration => declaration?.name !== dshWebSearch)
-    if (kept.length === functionDeclarations.length) return [tool]
-    if (kept.length > 0) return [{ ...tool, functionDeclarations: kept }]
-    return Object.keys(otherFields).length > 0 ? [otherFields] : []
-  })
-}
+const nativeModes = new Set(['off', 'search-only', 'mixed'])
+const nativeFrameLimit = 1024 * 1024
+const replayLimit = 2 * 1024 * 1024
+const candidateLimit = 4_096
 
 function generationUrl(baseURL, model) {
   // Mirror the Google Developer API's resource naming for ordinary model IDs.
   // Do not guess at Vertex routes, escaped IDs, or queries containing a model.
-  if (!/^[\w.-]+(?:\/[\w.-]+)*$/u.test(model) || model.includes('..')) return
+  if (typeof baseURL !== 'string' || typeof model !== 'string'
+    || !/^[\w.-]+(?:\/[\w.-]+)*$/u.test(model) || model.includes('..')) return
   const path = /^(?:models|tunedModels)\//u.test(model) ? model : `models/${model}`
   try {
     const base = new URL(baseURL)
@@ -27,64 +23,86 @@ function generationUrl(baseURL, model) {
   } catch { /* An unfamiliar endpoint must not enable interception. */ }
 }
 
-function augmentedBody(raw) {
+function parseBody(raw) {
   if (typeof raw !== 'string') return
   let body
   try { body = JSON.parse(raw) } catch { return }
   if (!isObject(body) || !Array.isArray(body.contents)
     || (body.tools !== undefined && !Array.isArray(body.tools))) return
-  const originalTools = body.tools ?? []
-  if (originalTools.some(tool => !isObject(tool)
-    || Object.hasOwn(tool, 'googleSearch') || Object.hasOwn(tool, 'google_search')
-    || Object.hasOwn(tool, 'googleSearchRetrieval'))) return
+  return body
+}
 
-  // Replace the competing local search only when we can add native search in
-  // the same request. Keep all other definitions and the session history.
-  const tools = withoutDshWebSearch(originalTools)
-  if (originalTools.some(hasFunctions)) {
-    // Google requires this preview opt-in when mixing built-ins with functions.
-    // Its examples omit the mode; AUTO is not supported. Never override a mode
-    // or an explicit false chosen by a different integration.
-    const config = body.toolConfig
-    if (config !== undefined && (!isObject(config) || config.includeServerSideToolInvocations === false)) return
-    const calling = config?.functionCallingConfig
-    if (calling !== undefined && (!isObject(calling)
-      || (calling.mode !== undefined && calling.mode !== 'VALIDATED'))) return
-
-    if (tools.some(hasFunctions)) {
-      body.toolConfig = { ...config, includeServerSideToolInvocations: true }
-      const allowed = calling?.allowedFunctionNames
-      if (Array.isArray(allowed) && allowed.includes(dshWebSearch)) {
-        const kept = allowed.filter(name => name !== dshWebSearch)
-        // Don't widen an explicit allowlist to all local tools.
-        if (kept.length === 0) return
-        body.toolConfig.functionCallingConfig = { ...calling, allowedFunctionNames: kept }
-      }
-    } else if (calling !== undefined) {
-      // An otherwise search-only request no longer needs a function policy.
-      const { functionCallingConfig, ...rest } = config
-      if (Object.keys(rest).length > 0) body.toolConfig = rest
-      else delete body.toolConfig
-    }
+function replaceBody(init, body) {
+  // Keep relay/proxy behavior, auth, attribution and cancellation. A
+  // caller-supplied length is the only header invalidated by the edit.
+  const headers = new Headers(init.headers)
+  if (headers.has('content-length')) {
+    headers.delete('content-length')
+    return { ...init, headers, body }
   }
-  body.tools = [...tools, { googleSearch: {} }]
-  return JSON.stringify(body)
+  return { ...init, body }
 }
 
 function scopedStream(scope, state, next) {
   const stream = scope.run(state, next)
+  if (!state?.native) {
+    return {
+      [Symbol.asyncIterator]() {
+        // Starting the waterfall alone is not enough: adapter dispatch and SDK
+        // I/O don't start until this lazy iterable is actually consumed.
+        const iterator = scope.run(state, () => stream[Symbol.asyncIterator]())
+        const bound = { next: (...args) => scope.run(state, () => iterator.next(...args)) }
+        for (const method of ['return', 'throw']) {
+          if (typeof iterator[method] === 'function') {
+            bound[method] = (...args) => scope.run(state, () => iterator[method](...args))
+          }
+        }
+        return bound
+      },
+    }
+  }
   return {
-    [Symbol.asyncIterator]() {
-      // Starting the waterfall alone is not enough: adapter dispatch and SDK
-      // I/O don't start until this lazy iterable is actually consumed.
+    async *[Symbol.asyncIterator]() {
       const iterator = scope.run(state, () => stream[Symbol.asyncIterator]())
-      const bound = { next: (...args) => scope.run(state, () => iterator.next(...args)) }
-      for (const method of ['return', 'throw']) {
-        if (typeof iterator[method] === 'function') {
-          bound[method] = (...args) => scope.run(state, () => iterator[method](...args))
+      const blocksByIndex = new Map()
+      let done = false
+      try {
+        for (;;) {
+          const item = await scope.run(state, () => iterator.next())
+          if (item.done) { done = true; return }
+          const chunk = item.value
+          if (chunk?.type === 'block-end' && !blocksByIndex.has(chunk.index)) {
+            blocksByIndex.set(chunk.index, chunk.block)
+          }
+          if (chunk?.type === 'finish') {
+            const capture = state.capture
+            if (capture && !capture.overflow && capture.frames.length > 0) {
+              const kind = chunk.reason?.kind
+              const outcome = kind === 'stop' || kind === 'tool-calls'
+                ? 'complete' : kind === 'max-tokens' ? 'truncated' : 'failed'
+              if (outcome !== 'complete' || !capture.invalid) {
+                const normalizedBlocks = [...blocksByIndex.entries()]
+                  .sort((left, right) => left[0] - right[0])
+                  .map(([, block]) => block)
+                const callIds = normalizedBlocks
+                  .filter(block => block?.type === 'tool-call' && typeof block.id === 'string')
+                  .map(block => block.id)
+                const nativeData = makeNativeReplayData(
+                  capture.route, state.model, capture.frames, callIds, outcome, capture.prefix,
+                  outcome === 'complete' ? normalizedBlocks : undefined,
+                )
+                yield { ...chunk, replayState: attachNativeReplay(chunk.replayState, nativeData) }
+                continue
+              }
+            }
+          }
+          yield chunk
+        }
+      } finally {
+        if (!done && typeof iterator.return === 'function') {
+          await scope.run(state, () => iterator.return())
         }
       }
-      return bound
     },
   }
 }
@@ -99,7 +117,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function googleSearch(ctx, config, matchesModelId, observerFor, ownRoutes = []) {
+export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -115,51 +133,89 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, ownRoutes
     if (transport !== undefined || !active) return
     const previous = globalThis.fetch
     if (typeof previous !== 'function') return
-    function fetchWithSearch(input, init) {
+    function fetchWithGeminiEnhancement(input, init) {
       const state = active ? scope.getStore() : undefined
       const expected = state?.url
       if (expected !== undefined && typeof input === 'string' && init?.method === 'POST') {
         const url = URL.parse(input)
         if (url?.origin === expected.origin && url.pathname === expected.pathname
           && url.searchParams.get('alt') === 'sse') {
-          const body = augmentedBody(init.body)
-          if (body !== undefined) {
-            // Keep relay/proxy behavior, auth, attribution and cancellation. A
-            // caller-supplied length is the only header invalidated by the edit.
-            const headers = new Headers(init.headers)
-            let forwarded
-            if (headers.has('content-length')) {
-              headers.delete('content-length')
-              forwarded = { ...init, headers, body }
-            } else forwarded = { ...init, body }
-            // The loop publishes attempt start before it first pulls this lazy
-            // stream. Bind once, before calling the network transport.
-            const observe = observerFor?.(state.sessionId)
-            const result = previous.call(this, input, forwarded)
-            return observe ? Promise.resolve(result).then(observe) : result
+          const parsed = parseBody(init.body)
+          if (parsed !== undefined) {
+            if (state.native) {
+              let route
+              try {
+                const baseURL = normalizeEndpoint(state.baseURL)
+                route = { baseURL, provider: state.provider, search: state.search }
+                route.identity = routeIdentity(route)
+              } catch { /* Non-standard endpoint stays untouched. */ }
+              if (route) {
+                const patched = patchGenerateContentBody(parsed, state.request, route)
+                if (patched) {
+                  const forwarded = patched.changed ? replaceBody(init, JSON.stringify(patched.body)) : init
+                  const capture = { route, prefix: patched.prefix, frames: [], savedBytes: 0, overflow: false, invalid: false }
+                  state.capture = capture
+                  const report = reportFor?.(state.sessionId)
+                  const observeSearch = report ? collectGoogleSearchEvidence(report) : undefined
+                  const result = previous.call(this, input, forwarded)
+                  return Promise.resolve(result).then(response => observeSseResponse(response, json => {
+                    if (!isObject(json)) return
+                    const frame = responseFrame(json)
+                    if (!frame?.length) return
+                    const candidate = selectedCandidate(frame)
+                    if (candidate != null) observeSearch?.({ candidates: [candidate] })
+                    if (capture.overflow) return
+                    capture.savedBytes += Buffer.byteLength(JSON.stringify(frame))
+                    if (capture.savedBytes > replayLimit || capture.frames.length >= candidateLimit) {
+                      capture.overflow = true
+                      capture.frames.length = 0
+                    } else {
+                      capture.frames.push(frame)
+                    }
+                  }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
+                }
+              }
+            } else {
+              const patched = applyGoogleSearchTools(parsed, 'mixed')
+              if (patched.changed) {
+                const forwarded = replaceBody(init, JSON.stringify(patched.body))
+                // The loop publishes attempt start before it first pulls this lazy
+                // stream. Bind once, before calling the network transport.
+                const observe = observerFor?.(state.sessionId)
+                const result = previous.call(this, input, forwarded)
+                return observe ? Promise.resolve(result).then(observe) : result
+              }
+            }
           }
         }
       }
       return previous.apply(this, arguments)
     }
-    try { globalThis.fetch = fetchWithSearch } catch {
+    try { globalThis.fetch = fetchWithGeminiEnhancement } catch {
       warnOnce('this Host does not allow wrapping fetch; search remains inactive.')
       return
     }
-    transport = { previous, wrapper: fetchWithSearch }
+    transport = { previous, wrapper: fetchWithGeminiEnhancement }
   }
 
   ctx.on('llm/stream', (request, next) => {
     let state
-    if (active && !ownRoutes.includes(request.provider) && config.enableGoogleSearch.get() && request.purpose === undefined
-      && matchesModelId(request.model, config.modelIds.get())) {
-      // Use the mounted LLM module's identity predicate, not a second import
-      // whose marker WeakSet might belong to a different module generation.
-      const isAgentLoopRequest = loopRequestPredicate(ctx)
-      if (!isAgentLoopRequest) {
-        warnOnce('cannot identify Agent Loop requests on this DSH version; search remains inactive.')
-      } else if (isAgentLoopRequest(request)) {
-        state = { provider: request.provider, model: request.model, sessionId: request.sessionId }
+    if (active && request.purpose === undefined && request.sessionId !== undefined) {
+      const modes = config.modelPageRoutes?.get?.()
+      const nativeMode = modes && Object.hasOwn(modes, request.provider) ? modes[request.provider] : undefined
+      const wantsNative = nativeModes.has(nativeMode)
+      const wantsSearch = !wantsNative && config.enableGoogleSearch.get() && matchesModelId(request.model, config.modelIds.get())
+      if (wantsNative || wantsSearch) {
+        // Use the mounted LLM module's identity predicate, not a second import
+        // whose marker WeakSet might belong to a different module generation.
+        const isAgentLoopRequest = loopRequestPredicate(ctx)
+        if (!isAgentLoopRequest) {
+          warnOnce('cannot identify Agent Loop requests on this DSH version; search remains inactive.')
+        } else if (isAgentLoopRequest(request)) {
+          state = wantsNative
+            ? { native: true, search: nativeMode, provider: request.provider, model: request.model, sessionId: request.sessionId, request, capture: null }
+            : { native: false, search: 'mixed', provider: request.provider, model: request.model, sessionId: request.sessionId }
+        }
       }
     }
     if (state === undefined && scope.getStore() === undefined) return next()
@@ -171,6 +227,7 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, ownRoutes
     if (active && state && state.provider === request.provider && state.model === request.model
       && state.sessionId === request.sessionId && request.purpose === undefined) {
       state.url = generationUrl(request.baseURL, request.model)
+      state.baseURL = request.baseURL
       if (state.url) installTransport()
     }
     return next()

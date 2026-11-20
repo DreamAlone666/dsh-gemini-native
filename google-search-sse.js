@@ -221,11 +221,11 @@ export function createSseDecoder(observe, { frameLimit = maxFrameBytes, invalid 
   }
 }
 
-export function observeGoogleSearchResponse(response, report) {
+export function observeSseResponse(response, onPayload, { frameLimit = maxFrameBytes, invalid } = {}) {
   if (!(response instanceof Response) || !response.ok || !response.body || response.bodyUsed || response.body.locked
     || response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'text/event-stream') return response
 
-  const inspect = createSseDecoder(collectGoogleSearchEvidence(report)).push
+  const decoder = createSseDecoder(onPayload, { frameLimit, invalid })
   const reader = response.body.getReader()
   let cancelled = false
   // One upstream read per downstream demand; no separately buffered branch.
@@ -243,11 +243,12 @@ export function observeGoogleSearchResponse(response, report) {
       }
       if (cancelled) return
       if (item.done) {
+        try { decoder.end() } catch { /* Observation is best-effort. */ }
         reader.releaseLock()
         controller.close()
         return
       }
-      try { inspect(item.value) } catch { /* Observation is best-effort. */ }
+      try { decoder.push(item.value) } catch { /* Observation is best-effort. */ }
       if (!cancelled) controller.enqueue(item.value)
     },
     async cancel(reason) {
@@ -256,4 +257,8 @@ export function observeGoogleSearchResponse(response, report) {
     },
   }, { highWaterMark: 0 })
   return new Response(body, { headers: response.headers, status: response.status, statusText: response.statusText })
+}
+
+export function observeGoogleSearchResponse(response, report) {
+  return observeSseResponse(response, collectGoogleSearchEvidence(report))
 }

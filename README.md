@@ -32,40 +32,16 @@ gemini-4.*
 
 ## 可选：在插件页按供应商启用 Gemini 原生历史（实验）
 
-1. 在 **设置 → 模型** 保留已有的自定义供应商，选择它实际支持的内置 **Gemini API** 并保存；Provider ID、URL、密钥和模型目录继续由 DSH 管理。若原地址是 OpenAI 路径，请确认它是否适用于 Gemini API（例如包括 `/v1beta`）。模型页不增加自定义协议或开关。
-2. 到 **插件 → Gemini 增强 → 配置 → Gemini 原生历史（实验）**，为需要的供应商选模式并保存。**沿用原路径（不保留原生历史）**是不接管该供应商；**保留原生 parts**只启用原生留存，不开启 Google 搜索；另外两种模式按需开启搜索。只给明确支持混用的端点选混用。旧供应商卡片中保存过的偏好仍然有效，无需重新配置。
-3. 用新文本会话验证。当前只接管明确启用了模式、并配置了地址和密钥引用的自定义 Gemini API 路由；图片、文件、已有签名的 pi-ai 历史、未支持的自定义 headers／推理配置及辅助请求走原路径。原生请求一旦发出，不会失败后用 pi-ai 重发。切回默认方式不会删除已保存的 parts 或卡片；会话中途切换后不保证此前的原生历史仍能无损续轮。
-
-本方案不需要修改或重建 DSH。模型发现、配置、模型准备仍由 DSH／pi-ai 持有，插件通过现有流扩展点处理符合条件的请求。
-
-### 备用：从 Host 配置注册独立原生路由
-
-如果不走模型页，也可在插件的 Host 配置中加 `generateContentRoutes`。每个键是一个**尚未被 DSH 使用的 Provider ID**，同一实现可以服务多条直连或透传路由；不需要额外预设。下例仅展示配置形状，替换端点、凭据引用和实际模型 ID 后使用：
-
-```yaml
-generateContentRoutes:
-  gemini-direct-native:
-    api: google-generative-ai
-    baseURL: https://generativelanguage.googleapis.com/v1beta
-    apiKeyEnv: GEMINI_API_KEY
-    search: mixed
-    models:
-      - id: gemini-4-hydrogen
-  gemini-relay-native:
-    api: google-generative-ai
-    baseURL: https://relay.example/v1beta
-    apiKeyEnv: RELAY_GEMINI_API_KEY
-    search: off
-    models:
-      - id: gemini-4-hydrogen
-```
-
-配置变更请在新会话验证；原型不承诺会话中途更换协议或搜索策略后仍能无损回放。旧 pi-ai 路由的 Web 开关仍可独立使用，既有设置不会切换到原生 Adapter。
-
-- `search` 默认 `off`；`search-only` 只在没有其他本地函数时挂载；`mixed` 仅用于确认支持工具混用和历史循环的端点。只有本次确实挂载 `googleSearch` 时，才从发送的声明移除 `web_search`。其他路由不受影响。不要为旧历史把不同端点复用成同一个路由。
-- 原生路由直连 REST/SSE，不走旧版全局 `fetch` 包装。正文、推理文本和本地函数仍用 DSH 已有的内容块保存；有序原生增量引用其中能精确重建的字段，另存签名、原生工具结果、未知字段和必要的帧边界。小响应省不下空间时、失败或截断时保留原始 parts；旧记录仍可读。只有相同路由、模型、配置身份及可见历史前缀兼容时才回放；否则只使用 DSH 通用历史。Gemini 的服务端工具不会作为本地工具执行。
-- 聊天仍用轮尾卡片；原生路由的摘要从 Session 日志重建，重开后可读，不插入内置「轨迹」。有权读取 DSH 原始会话事件的客户端也能读到原生数据；投影只提供摘要，不添加请求认证头或凭据。插件启用时，若会话已存有原生数据，将通过 DSH 的排除钩子跳过该会话的 `dsh_session_log` 官方 API 附带上传，普通对话消息不受影响。若停用插件，请在 DSH 中关闭这项上传，再用官方模型打开曾记录过原生数据的会话。
-- 当前只验证了文本和普通本地函数调用；未实现 Vertex 认证、图片请求和流式函数参数。单个 SSE 事件最多 1 MiB、单次原生记录最多 2 MiB；超限明确失败，不把截断结果当成可回放历史。进程在 attempt 落盘前硬中断时没有可重建的记录。
+1. 在 **设置 → 模型** 配置并保存使用内置 **Gemini API** 的供应商（支持自定义中转及内置 `google` 目录路由）；Provider ID、URL、密钥、自定义 headers、推理配置与模型目录继续完全由 DSH 与内置 `pi-ai` 管理。
+2. 到 **插件 → Gemini 增强 → 配置 → Gemini 原生历史（实验）**，为需要的供应商选模式并保存：
+   - **沿用原路径（不保留原生历史）**：不介入原生历史；
+   - **保留原生 parts**：仅留存/回放 Gemini 原生 parts，不开启 Google 搜索；
+   - **保留 parts；没有其他函数时使用 Google 搜索** / **混用 Google 搜索与本地函数**：按需在同链路挂载 Google 搜索。仅对明确支持混用的端点开启混用。
+3. **复用内置 `pi-ai` Adapter**：插件不再维护独立 Adapter，而是通过 `llm/stream` + `llm-pi-ai/request-headers` + 作用域 `fetch` 代理在内置 `pi-ai` 链路上增量完成两件事：
+   - **出站修补**：将通过路由、模型和前缀指纹校验的历史 `model` 轮次 `parts` 替换为保留的原生 `parts`（包含签名、`toolCall`/`toolResponse` 和未知字段），并对齐紧随其后的 `functionResponse.id`；按模式注入 `googleSearch` 与 `includeServerSideToolInvocations`。
+   - **入站旁路录制**：原始 SSE 字节原样透传给内置 `pi-ai` 完成流式分块合并、usage 统计与错误分类，旁路解码器仅记录原始 `frames` 与搜索证据，并将压缩后的原生数据嵌入 `pi-ai` 自身的 `replayState`（即使日后关闭原生模式或卸载插件，原有的 `pi-ai` 签名仍完好可用）。
+4. 图片、文件附件、多模态工具结果、自定义 headers、`thinkingBudgets`、OAuth／凭据解析、超时与错误分类均直接由内置 `pi-ai` 处理，无需回退或重复实现。
+5. 聊天仍用轮尾卡片；原生模式的搜索摘要由 `nativeSearchProjection` 从 Session 日志重建，重开后可读。单帧 SSE 上限 1 MiB、单次原生记录上限 2 MiB，超限时仅跳过本次原生回放录制而不中断正常对话。插件启用时，若会话已存有原生数据，将通过 DSH 的排除钩子跳过 `dsh_session_log` 官方上传；若停用插件，请在 DSH 中关闭该上传后再用官方模型打开曾记录过原生数据的会话。
 
 ## 可选：显示汉化提示
 

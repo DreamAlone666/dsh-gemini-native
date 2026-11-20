@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { hasNativeReplay, historyFingerprint, makePayload, makeReplayState, nativeReplayOf, readNativeReplay } from '../generate-content.js'
+import {
+  attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, makeReplayState,
+  nativeReplayOf, patchGenerateContentBody, readNativeReplay,
+} from '../generate-content.js'
 import { nativeSearchProjection } from '../native-search-projection.js'
 
 const route = { identity: 'example-route', search: 'mixed' }
@@ -50,33 +53,69 @@ function confirmation(envelope, content = blocks, stream = terminal(envelope)) {
   return { type: 'assistant/message', data: { turn: 1, message: message(envelope, content), stream } }
 }
 
-function payload(envelope, content = blocks) {
-  return makePayload({ provider: 'gemini', model, sessionId: 'offline', messages: [
-    { role: 'user', content: [{ type: 'text', text: 'Check this' }] }, message(envelope, content),
-    { role: 'tool', toolCallId: localId, content: [{ type: 'text', text: 'Done' }] },
-  ] }, route)
+function wireBody(content = blocks, toolParts = []) {
+  const modelParts = content.flatMap(block => {
+    if (block.type === 'text') return [{ text: block.text }]
+    if (block.type === 'reasoning') return [{ thought: true, text: block.text }]
+    if (block.type === 'tool-call') return [{ functionCall: { id: block.id, name: block.name, args: JSON.parse(block.arguments) } }]
+    return []
+  })
+  return {
+    contents: [
+      { role: 'user', parts: [{ text: 'Check this' }] },
+      { role: 'model', parts: modelParts },
+      ...content.some(block => block.type === 'tool-call') ? [{
+        role: 'user',
+        parts: [{ functionResponse: { id: localId, name: 'read_mock', response: { output: 'Done' }, ...toolParts.length ? { parts: toolParts } : {} } }],
+      }] : [{ role: 'user', parts: [{ text: 'Follow up' }] }],
+    ],
+  }
+}
+
+function patched(envelope, content = blocks, targetRoute = route, toolParts = []) {
+  const req = {
+    provider: 'gemini', model, sessionId: 'offline',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Check this' }] },
+      message(envelope, content),
+      ...content.some(block => block.type === 'tool-call')
+        ? [{ role: 'tool', toolCallId: localId, content: [{ type: 'text', text: 'Done' }] }]
+        : [{ role: 'user', content: [{ type: 'text', text: 'Follow up' }] }],
+    ],
+  }
+  return patchGenerateContentBody(wireBody(content, toolParts), req, targetRoute)
 }
 
 const summary = { status: 'completed', queries: ['query one', 'query two'], sources: [{ url: 'https://example.org/source', title: 'example.org' }] }
 
-test('compact replay omits duplicate values and round trips opaque parts, all positions and wire key order', () => {
-  const envelope = build()
-  assert.equal(envelope.response.version, 2)
-  assert.ok(envelope.response.refs.length > 0, 'expect references in the substantial mixed response')
-  for (const block of blocks) {
-    assert.ok(!JSON.stringify(envelope).includes(block.text ?? 'Argument data '), `duplicate ${block.type}`)
+test('compact replay omits duplicate values, embeds cleanly in pi-ai envelope, and preserves multimodal tool results', () => {
+  const nativeData = makeNativeReplayData(route, model, frames, [localId], 'complete', prefix, blocks)
+  const piEnvelope = {
+    response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'gemini', model, stopReason: 'toolUse' },
+    blocks: [{ type: 'text', textSignature: 'first-signature' }],
   }
-  assert.ok(Buffer.byteLength(JSON.stringify(envelope)) < Buffer.byteLength(JSON.stringify(v1)) / 2)
-  const cold = clone(envelope)
+  const embedded = attachNativeReplay(piEnvelope, nativeData)
+  assert.equal(embedded.response.kind, 'pi-ai')
+  assert.equal(embedded.response.dshGeminiNative.version, 2)
+  assert.ok(embedded.response.dshGeminiNative.refs.length > 0, 'expect references in the substantial mixed response')
+  for (const block of blocks) {
+    assert.ok(!JSON.stringify(embedded).includes(block.text ?? 'Argument data '), `duplicate ${block.type}`)
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(embedded)) < Buffer.byteLength(JSON.stringify(v1)) / 2)
+  const cold = clone(embedded)
   const durableBlocks = clone(blocks)
   const decoded = readNativeReplay(cold, durableBlocks)
   assert.equal(JSON.stringify(decoded.frames), JSON.stringify(frames))
   assert.deepEqual(decoded.frames[0][0], alternate)
   assert.equal(frames[0][1].content.parts[0].text, blocks[0].text, 'encoding never mutates the original parts')
-  assert.deepEqual(payload(cold), payload(v1))
-  const { contents } = payload(cold)
-  assert.equal(JSON.stringify(contents[1].parts), JSON.stringify(parts))
-  assert.equal(contents[2].parts[0].functionResponse.id, 'wire-read-9')
+  const toolImage = [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }]
+  const out = patched(cold, durableBlocks, route, toolImage)
+  assert.equal(out.changed, true)
+  assert.equal(JSON.stringify(out.body.contents[1].parts), JSON.stringify(parts))
+  assert.equal(out.body.contents[2].parts[0].functionResponse.id, 'wire-read-9')
+  assert.deepEqual(out.body.contents[2].parts[0].functionResponse.parts, toolImage)
+  assert.equal(out.body.toolConfig.includeServerSideToolInvocations, true)
+  assert.deepEqual(patched(cold).body.contents, patched(v1).body.contents)
 })
 
 test('missing, changed and malformed references fail closed without losing upload exclusion', () => {
@@ -85,7 +124,7 @@ test('missing, changed and malformed references fail closed without losing uploa
   const changed = clone(blocks)
   changed[0].text = 'different'
   assert.equal(readNativeReplay(envelope, changed), undefined)
-  assert.deepEqual(payload(envelope, changed).contents[1].parts[0], { text: 'different' })
+  assert.deepEqual(patched(envelope, changed).body.contents[1].parts[0], { text: 'different' })
   const malformed = clone(envelope)
   malformed.response.refs[0][0] = 420
   assert.equal(readNativeReplay(malformed, blocks), undefined)
@@ -145,24 +184,27 @@ test('same-part text and function references keep absent and empty function fiel
 })
 
 test('projection is ordered and can decode cold interrupted events from authoritative block ends', () => {
-  const envelope = clone(build())
+  const piEmbedded = attachNativeReplay(
+    { response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'gemini', model, stopReason: 'stop' }, blocks: [] },
+    makeNativeReplayData(route, model, frames, [localId], 'complete', prefix, blocks),
+  )
   const apply = nativeSearchProjection.apply
-  const committed = confirmation(envelope)
-  assert.deepEqual(apply({}, committed), { 1: [summary] })
+  assert.deepEqual(apply({}, confirmation(clone(piEmbedded))), { 1: [summary] })
+  assert.deepEqual(apply({}, confirmation(clone(build()))), { 1: [summary] })
   assert.deepEqual(apply({}, confirmation(v1)), { 1: [summary] })
   const reduced = blocks.filter(block => block.type !== 'tool-call')
-  const interrupted = { ...confirmation(envelope, reduced), data: { ...confirmation(envelope, reduced).data, interrupted: true } }
+  const interrupted = { ...confirmation(clone(piEmbedded), reduced), data: { ...confirmation(clone(piEmbedded), reduced).data, interrupted: true } }
   assert.equal(JSON.stringify(nativeReplayOf(clone(interrupted)).frames), JSON.stringify(frames))
   assert.deepEqual(apply({}, clone(interrupted)), { 1: [summary] })
-  const attempt = { type: 'assistant/attempt', data: { turn: 1, stream: terminal(envelope) } }
+  const attempt = { type: 'assistant/attempt', data: { turn: 1, stream: terminal(clone(piEmbedded)) } }
   assert.deepEqual(apply({}, clone(attempt)), { 1: [summary] })
-  const missing = { type: 'assistant/attempt', data: { turn: 1, stream: terminal(envelope, reduced) } }
+  const missing = { type: 'assistant/attempt', data: { turn: 1, stream: terminal(clone(piEmbedded), reduced) } }
   const before = {}
   assert.strictEqual(apply(before, missing), before)
   assert.equal(hasNativeReplay(missing), true)
 })
 
-test('slice refs compact multi-frame streamed text/reasoning, reject bad slices, and remain compatible with legacy unmerged messages', () => {
+test('slice refs compact multi-frame streamed text/reasoning, reject bad slices, and stay compatible with legacy unmerged messages', () => {
   const r1 = 'Thinking part one 🧪 '.repeat(12)
   const r2 = 'Thinking part two. '.repeat(12)
   const t1 = 'First markdown **chunk '.repeat(16)
@@ -186,12 +228,8 @@ test('slice refs compact multi-frame streamed text/reasoning, reject bad slices,
   assert.ok(!JSON.stringify(envelope).includes(r1))
   assert.ok(!JSON.stringify(envelope).includes(t2))
   assert.equal(JSON.stringify(readNativeReplay(clone(envelope), clone(mergedBlocks)).frames), JSON.stringify(streamedFrames))
-  const replayPayload = (env, content) => makePayload({ provider: 'gemini', model, sessionId: 'offline', messages: [
-    { role: 'user', content: [{ type: 'text', text: 'Check this' }] }, message(env, content),
-    { role: 'user', content: [{ type: 'text', text: 'Follow up' }] },
-  ] }, route)
   assert.deepEqual(
-    replayPayload(clone(envelope), clone(mergedBlocks)).contents[1].parts,
+    patched(clone(envelope), clone(mergedBlocks)).body.contents[1].parts,
     streamedFrames.flatMap(frame => frame[0].content.parts),
   )
 
@@ -217,7 +255,18 @@ test('slice refs compact multi-frame streamed text/reasoning, reject bad slices,
   const legacyV1 = { response: { kind: 'dsh-gemini-generate-content', version: 1, route: route.identity, model,
     frames: streamedFrames, callIds: [], outcome: 'complete', prefix } }
   assert.deepEqual(
-    replayPayload(legacyV1, legacyBlocks).contents[1].parts,
+    patched(legacyV1, legacyBlocks).body.contents[1].parts,
     streamedFrames.flatMap(frame => frame[0].content.parts),
   )
+})
+
+test('functionResponse ID is stripped when the original Gemini functionCall had no id', () => {
+  const noIdCall = { functionCall: { name: 'read_mock', args: { path: 'a.txt' } }, thoughtSignature: 'sig-no-id' }
+  const noIdFrames = [[selected([noIdCall], { finishReason: 'STOP' })]]
+  const noIdBlocks = [{ type: 'tool-call', id: localId, name: 'read_mock', arguments: JSON.stringify({ path: 'a.txt' }) }]
+  const env = makeReplayState(route, model, noIdFrames, [localId], 'complete', prefix, noIdBlocks)
+  const out = patched(env, noIdBlocks)
+  assert.equal(out.changed, true)
+  assert.deepEqual(out.body.contents[1].parts, [noIdCall])
+  assert.ok(!Object.hasOwn(out.body.contents[2].parts[0].functionResponse, 'id'))
 })

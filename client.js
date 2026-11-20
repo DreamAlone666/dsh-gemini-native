@@ -8,14 +8,14 @@ window.__ModuleLoader__.load({
     const en = {
       title: 'Model ID rules',
       enableSearch: 'Google Search on pi-ai routes (experimental)',
-      searchHelp: 'Off by default. Applies the model ID rules above to new pi-ai Gemini Developer API conversations; cards are temporary. Explicit GenerateContent routes manage their own search mode and persist their cards.',
+      searchHelp: 'Off by default. Applies the model ID rules above to pi-ai Gemini Developer API conversations not already managed below; cards are temporary.',
       routeNativeMode: 'Gemini native history (experimental)',
       routeNativeDefault: 'Keep the existing path (no native history)',
       routeNativeReplay: 'Preserve native parts',
       routeNativeSearchOnly: 'Preserve parts + Google Search when no other functions are available',
       routeNativeMixed: 'Preserve parts + Google Search with local functions',
-      routeNativeHelp: 'Choose a mode for an existing custom Gemini API provider from Settings → Models. Candidates are not verified endpoints. Use a new text chat; unsupported requests use the existing path. Only enable mixed tools on compatible endpoints. The separate pi-ai Google Search setting is unchanged.',
-      routeNativeNone: 'No configured Gemini API candidates. Add or edit a custom provider in Settings → Models.',
+      routeNativeHelp: 'Choose a mode for a configured Gemini API provider from Settings → Models. Runs on top of the built-in pi-ai adapter (keeping images, custom headers, auth, and streaming). Only enable mixed tools on compatible endpoints.',
+      routeNativeNone: 'No configured Gemini API candidates. Add or configure a Gemini API provider in Settings → Models.',
       routeNativeLoading: 'Reading providers from Settings → Models…',
       routeNativeUnreadable: 'Cannot read model settings now. You can still turn off saved native modes.',
       routeNativeUnavailable: 'Not currently a Gemini API candidate. You can still turn off its native mode.',
@@ -50,14 +50,14 @@ window.__ModuleLoader__.load({
     const zh = {
       title: '模型 ID 规则',
       enableSearch: 'pi-ai 路由的 Google 原生搜索（实验）',
-      searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对后续经 pi-ai 发出的 Gemini Developer API 对话；搜索卡片只临时保留。单独配置的 GenerateContent 原生路由使用自己的搜索模式和持久卡片。',
+      searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对未被下方原生历史接管的 pi-ai Gemini Developer API 对话；搜索卡片只临时保留。',
       routeNativeMode: 'Gemini 原生历史（实验）',
       routeNativeDefault: '沿用原路径（不保留原生历史）',
       routeNativeReplay: '保留原生 parts',
       routeNativeSearchOnly: '保留 parts；没有其他函数时使用 Google 搜索',
       routeNativeMixed: '保留 parts；混用 Google 搜索与本地函数',
-      routeNativeHelp: '先在「设置 → 模型」保存自定义 Gemini API 供应商，再在这里按供应商选模式。候选依据已保存配置，不代表端点已验证。请用新文本会话试用；不支持的请求沿用原路径。仅对已确认支持混用的端点开启混用。旧 pi-ai 搜索开关独立，不受此处影响。',
-      routeNativeNone: '没有已配置的 Gemini API 候选供应商。请先在「设置 → 模型」中添加或编辑。',
+      routeNativeHelp: '先在「设置 → 模型」保存 Gemini API 供应商，再在这里按供应商选模式。复用内置 pi-ai Adapter（保留图片、自定义 headers、鉴权与流式渲染），仅增量做原生 parts 留存/回放与搜索。仅对已确认支持混用的端点开启混用。',
+      routeNativeNone: '没有已配置的 Gemini API 候选供应商。请先在「设置 → 模型」中添加或配置。',
       routeNativeLoading: '正在读取模型页中的供应商…',
       routeNativeUnreadable: '暂时无法读取模型设置，仍可关闭已保存的原生模式。',
       routeNativeUnavailable: '当前不是 Gemini API 候选供应商，仍可关闭原生模式。',
@@ -111,12 +111,14 @@ window.__ModuleLoader__.load({
 
     function eligibleProfiles(snapshot) {
       if (snapshot.status !== 'ready') return new Map()
-      return new Map(Object.entries(snapshot.value?.providers ?? {}).filter(([provider, profile]) =>
-        /^[a-z][a-z0-9-]*$/u.test(provider) && profile?.api === 'google-generative-ai'
-        && typeof profile.baseURL === 'string' && /^https?:\/\//iu.test(profile.baseURL)
-        && typeof profile.apiKeyEnv === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(profile.apiKeyEnv)
-        && Array.isArray(profile.models) && profile.models.length > 0,
-      ).map(([provider, profile]) => [provider, profile.displayName || provider]))
+      return new Map(Object.entries(snapshot.value?.providers ?? {}).filter(([provider, profile]) => {
+        if (!/^[a-z][a-z0-9-]*$/u.test(provider) || !profile || typeof profile !== 'object') return false
+        if (profile.api === 'google-generative-ai') {
+          return typeof profile.baseURL === 'string' && /^https?:\/\//iu.test(profile.baseURL)
+            && Array.isArray(profile.models) && profile.models.length > 0
+        }
+        return provider === 'google' && profile.api === undefined
+      }).map(([provider, profile]) => [provider, profile.displayName || provider]))
     }
 
     function ModelIdForm({ form, t, getModels, subscribeModels }) {
