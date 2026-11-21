@@ -43,7 +43,54 @@ function replaceBody(init, body) {
   return { ...init, body }
 }
 
-function scopedStream(scope, state, next) {
+function countLocalTools(tools) {
+  if (!Array.isArray(tools)) return 0
+  let count = 0
+  for (const tool of tools) {
+    if (Array.isArray(tool?.functionDeclarations)) count += tool.functionDeclarations.length
+  }
+  return count
+}
+
+function hasSearchTool(tools) {
+  return Array.isArray(tools) && tools.some(tool => isObject(tool)
+    && (Object.hasOwn(tool, 'googleSearch') || Object.hasOwn(tool, 'google_search') || Object.hasOwn(tool, 'googleSearchRetrieval')))
+}
+
+function buildOutboundTelemetry(state, host, finalBody, historyStats = null) {
+  const localToolCount = countLocalTools(finalBody?.tools)
+  const searchInjected = hasSearchTool(finalBody?.tools)
+  const searchConfigured = state.googleSearch === true
+  const searchMode = !searchConfigured
+    ? 'off'
+    : !searchInjected
+      ? 'skipped'
+      : localToolCount > 0 ? 'mixed' : 'search-only'
+  const rawThinkingLevel = finalBody?.generationConfig?.thinkingConfig?.thinkingLevel
+  const thinkingLevel = typeof rawThinkingLevel === 'string' && rawThinkingLevel.length > 0 ? rawThinkingLevel : null
+  const xhighRequested = state.xhigh === true
+  const xhighApplied = xhighRequested && thinkingLevel === 'XHIGH'
+  return {
+    provider: state.provider,
+    model: state.model,
+    status: 'ok',
+    host: host ?? null,
+    totalHistoryTurns: historyStats ? historyStats.totalModelTurns : null,
+    replayedHistoryTurns: historyStats ? historyStats.replayedModelTurns : null,
+    searchConfigured,
+    searchInjected,
+    searchMode,
+    localToolCount,
+    xhighRequested,
+    xhighApplied,
+    thinkingLevel,
+    recordedBytes: null,
+    recordedFrames: null,
+    recordStatus: null,
+  }
+}
+
+function scopedStream(scope, state, next, onFinish) {
   const stream = scope.run(state, next)
   if (!state?.nativeHistory || state.readOnly) {
     return {
@@ -102,6 +149,7 @@ function scopedStream(scope, state, next) {
         if (!done && typeof iterator.return === 'function') {
           await scope.run(state, () => iterator.return())
         }
+        onFinish?.(state)
       }
     },
   }
@@ -124,7 +172,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled) {
+export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled, recordTransport) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -134,6 +182,28 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
     if (warned) return
     warned = true
     ctx.logger.warn(`Gemini enhancement: ${message}`)
+  }
+
+  function reportMainTransport(state, snapshot) {
+    if (active && state?.purpose === undefined) {
+      recordTransport?.(state.sessionId, snapshot)
+    }
+  }
+
+  function reportStreamFinish(state) {
+    if (!active || state?.purpose !== undefined || !state.capture || !state.outboundTelemetry) return
+    const capture = state.capture
+    const recordStatus = capture.overflow
+      ? 'overflow'
+      : capture.invalid
+        ? 'invalid'
+        : (capture.frames.length > 0 ? 'saved' : 'none')
+    recordTransport?.(state.sessionId, {
+      ...state.outboundTelemetry,
+      recordedBytes: capture.savedBytes,
+      recordedFrames: capture.frames.length,
+      recordStatus,
+    })
   }
 
   function installTransport() {
@@ -186,6 +256,9 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
                   const forwarded = changed ? replaceBody(init, JSON.stringify(thinkingPatched.body)) : init
                   const capture = { route, prefix: patched.prefix, frames: [], savedBytes: 0, overflow: false, invalid: false }
                   state.capture = capture
+                  const outbound = buildOutboundTelemetry(state, url.host, thinkingPatched.body, patched)
+                  state.outboundTelemetry = outbound
+                  reportMainTransport(state, outbound)
                   const report = reportFor?.(state.sessionId, true)
                   const observeSearch = report ? collectGoogleSearchEvidence(report) : undefined
                   const result = previous.call(this, input, forwarded)
@@ -209,6 +282,8 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
             } else if (state.googleSearch || state.xhigh) {
               const toolsPatched = applyGoogleSearchTools(parsed, state.googleSearch)
               const thinkingPatched = applyXHighThinking(toolsPatched.body, state.xhigh)
+              const outbound = buildOutboundTelemetry(state, url.host, thinkingPatched.body, null)
+              reportMainTransport(state, outbound)
               if (toolsPatched.changed || thinkingPatched.changed) {
                 const forwarded = replaceBody(init, JSON.stringify(thinkingPatched.body))
                 const report = toolsPatched.changed ? reportFor?.(state.sessionId, false) : undefined
@@ -253,6 +328,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
             sessionId: request.sessionId,
             request,
             capture: null,
+            outboundTelemetry: null,
           }
         }
       }
@@ -270,11 +346,12 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           sessionId: request.sessionId,
           request,
           capture: null,
+          outboundTelemetry: null,
         }
       }
     }
     if (state === undefined && scope.getStore() === undefined) return next()
-    return scopedStream(scope, state, next)
+    return scopedStream(scope, state, next, reportStreamFinish)
   })
 
   ctx.on('llm-pi-ai/request-headers', (request, _headers, next) => {
@@ -284,6 +361,27 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
       state.url = generationUrl(request.baseURL, request.model)
       state.baseURL = request.baseURL
       if (state.url) installTransport()
+      else if (state.purpose === undefined) {
+        const host = (() => { try { return new URL(request.baseURL).host } catch { return null } })()
+        reportMainTransport(state, {
+          provider: state.provider,
+          model: state.model,
+          status: 'url-mismatch',
+          host,
+          totalHistoryTurns: null,
+          replayedHistoryTurns: null,
+          searchConfigured: state.googleSearch,
+          searchInjected: false,
+          searchMode: state.googleSearch ? 'skipped' : 'off',
+          localToolCount: 0,
+          xhighRequested: state.xhigh,
+          xhighApplied: false,
+          thinkingLevel: null,
+          recordedBytes: null,
+          recordedFrames: null,
+          recordStatus: null,
+        })
+      }
     }
     return next()
   })

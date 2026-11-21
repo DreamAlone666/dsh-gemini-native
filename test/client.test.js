@@ -11,11 +11,51 @@ function createReactStub({ trackSubscriptions = false } = {}) {
     activeInstance = instance
     if (instance) {
       instance.hookIndex = 0
+      instance.pendingEffects = []
     }
   }
 
   function endRender() {
     activeInstance = null
+  }
+
+  function depsChanged(prev, next) {
+    if (!prev || !next) return true
+    if (prev.length !== next.length) return true
+    for (let i = 0; i < prev.length; i++) {
+      if (!Object.is(prev[i], next[i])) return true
+    }
+    return false
+  }
+
+  function flushEffects(instance) {
+    if (!instance?.pendingEffects?.length) return
+    const pending = instance.pendingEffects.splice(0)
+    for (const item of pending) {
+      const prev = instance.effects[item.idx]
+      if (!prev || depsChanged(prev.deps, item.deps)) {
+        if (typeof prev?.cleanup === 'function') prev.cleanup()
+        const cleanup = item.fn()
+        instance.effects[item.idx] = { deps: item.deps, cleanup }
+      }
+    }
+  }
+
+  function unmount(instance) {
+    if (!instance) return
+    for (const key of Object.keys(instance.effects ?? {})) {
+      const cleanup = instance.effects[key]?.cleanup
+      if (typeof cleanup === 'function') cleanup()
+    }
+    for (const key of Object.keys(instance.subs ?? {})) {
+      instance.subs[key]?.unsub?.()
+    }
+  }
+
+  function scheduleEffect(fn, deps) {
+    if (!activeInstance) return
+    const idx = activeInstance.hookIndex++
+    activeInstance.pendingEffects.push({ idx, fn, deps })
   }
 
   return {
@@ -45,9 +85,25 @@ function createReactStub({ trackSubscriptions = false } = {}) {
       }
       return activeInstance.refs[idx]
     },
-    useEffect() {},
+    useId() {
+      if (!activeInstance) return ':r0:'
+      const idx = activeInstance.hookIndex++
+      if (!(idx in activeInstance.ids)) {
+        activeInstance.ids[idx] = `:r${idx}:`
+      }
+      return activeInstance.ids[idx]
+    },
+    useEffect(fn, deps) {
+      scheduleEffect(fn, deps)
+    },
+    useLayoutEffect(fn, deps) {
+      scheduleEffect(fn, deps)
+    },
     useCallback(fn) {
       return fn
+    },
+    useMemo(fn) {
+      return fn()
     },
     useSyncExternalStore(subscribe, getSnapshot) {
       if (trackSubscriptions) {
@@ -69,8 +125,14 @@ function createReactStub({ trackSubscriptions = false } = {}) {
     },
     __beginRender: beginRender,
     __endRender: endRender,
+    __flushEffects: flushEffects,
+    __unmount: unmount,
     __unsubscribes: unsubscribes,
   }
+}
+
+function createInstance() {
+  return { hookIndex: 0, states: {}, refs: {}, subs: {}, ids: {}, effects: {}, pendingEffects: [], notified: 0 }
 }
 
 function findAll(node, predicate, out = []) {
@@ -84,11 +146,100 @@ function findAll(node, predicate, out = []) {
   return out
 }
 
+function collectText(node, out = []) {
+  if (node == null || typeof node === 'boolean') return out
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node))
+    return out
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectText(item, out)
+    return out
+  }
+  if (typeof node === 'object' && Array.isArray(node.children)) {
+    collectText(node.children, out)
+  }
+  return out
+}
+
 function renderTree(node) {
   if (!node || typeof node !== 'object') return node
   if (Array.isArray(node)) return node.map(renderTree)
   if (typeof node.type === 'function') return renderTree(node.type(node.props))
   return { ...node, children: (node.children ?? []).map(renderTree) }
+}
+
+function createMockDocument() {
+  const listeners = new Map()
+  const makeNode = tagName => {
+    const attrs = new Map()
+    const node = {
+      tagName,
+      children: [],
+      parentNode: null,
+      textContent: '',
+      dataset: {},
+      setAttribute(name, value) { attrs.set(name, String(value)) },
+      getAttribute(name) { return attrs.get(name) ?? null },
+      appendChild(child) {
+        child.parentNode = node
+        node.children.push(child)
+        return child
+      },
+      removeChild(child) {
+        const idx = node.children.indexOf(child)
+        if (idx >= 0) {
+          node.children.splice(idx, 1)
+          child.parentNode = null
+        }
+        return child
+      },
+      remove() {
+        node.parentNode?.removeChild(node)
+      },
+      querySelector(selector) {
+        const match = /^style\[data-plugin="([^"]+)"\]$/u.exec(selector)
+        if (!match) return null
+        return node.children.find(c => c.tagName === 'style' && (c.getAttribute('data-plugin') === match[1] || c.dataset?.plugin === match[1])) ?? null
+      },
+      contains(target) {
+        return target === node
+      },
+    }
+    return node
+  }
+
+  const head = makeNode('head')
+  const body = makeNode('body')
+
+  return {
+    baseURI: 'http://localhost/',
+    head,
+    body,
+    listeners,
+    createElement(tag) {
+      return makeNode(tag)
+    },
+    addEventListener(type, fn, capture = false) {
+      const key = `${type}:${Boolean(capture)}`
+      if (!listeners.has(key)) listeners.set(key, [])
+      listeners.get(key).push({ type, fn, capture: Boolean(capture) })
+    },
+    removeEventListener(type, fn, capture = false) {
+      const key = `${type}:${Boolean(capture)}`
+      const list = listeners.get(key)
+      if (!list) return
+      listeners.set(key, list.filter(entry => entry.fn !== fn))
+    },
+    dispatch(type, event, { captureOnly = false } = {}) {
+      for (const [key, list] of listeners) {
+        if (!key.startsWith(`${type}:`)) continue
+        const isCapture = key.endsWith(':true')
+        if (captureOnly && !isCapture) continue
+        for (const entry of [...list]) entry.fn(event)
+      }
+    },
+  }
 }
 
 async function loadClient({
@@ -99,13 +250,22 @@ async function loadClient({
   subagentSessions = new Set(),
   fetchImpl = null,
   trackSubscriptions = false,
+  withDom = true,
+  withReactDom = true,
+  supportsAnchor = true,
 } = {}) {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   const React = createReactStub({ trackSubscriptions })
+  const PORTAL_TYPE = Symbol('Portal')
+  const ReactDOM = withReactDom
+    ? { createPortal: (node, target) => ({ type: PORTAL_TYPE, props: { target }, children: [node] }) }
+    : null
   let registeredModule
   const eventSources = []
   const fetchCalls = []
   const effectCleanups = []
+  const mockDocument = withDom ? createMockDocument() : { baseURI: 'http://localhost/' }
+  const windowListeners = new Map()
 
   class MockEventSource {
     constructor(url) {
@@ -137,11 +297,21 @@ async function loadClient({
   const sandbox = {
     window: {
       location: { origin: 'http://localhost' },
+      innerWidth: 1200,
+      innerHeight: 800,
+      addEventListener(type, fn) {
+        if (!windowListeners.has(type)) windowListeners.set(type, new Set())
+        windowListeners.get(type).add(fn)
+      },
+      removeEventListener(type, fn) {
+        windowListeners.get(type)?.delete(fn)
+      },
       __ModuleLoader__: {
         load(mod) { registeredModule = mod },
       },
     },
-    document: { baseURI: 'http://localhost/' },
+    document: mockDocument,
+    CSS: supportsAnchor === null ? undefined : { supports: prop => supportsAnchor && prop === 'anchor-name' },
     URL,
     Map,
     Set,
@@ -149,6 +319,9 @@ async function loadClient({
     Array,
     JSON,
     Number,
+    String,
+    Boolean,
+    Math,
     Promise,
     Error,
     EventSource: MockEventSource,
@@ -157,8 +330,12 @@ async function loadClient({
   vm.runInNewContext(source, sandbox)
   assert.equal(registeredModule.id, 'dsh-gemini-enhancement')
   const plugin = registeredModule.factory(name => {
-    assert.equal(name, 'react')
-    return React
+    if (name === 'react') return React
+    if (name === 'react-dom') {
+      if (!ReactDOM) throw new Error('react-dom unavailable')
+      return ReactDOM
+    }
+    throw new Error(`unexpected require: ${name}`)
   })
 
   const mutations = []
@@ -214,13 +391,17 @@ async function loadClient({
   }
   plugin.apply(ctx)
   const t = key => locales.dicts.zh[key] ?? key
+  const tEn = key => locales.dicts.en[key] ?? key
   return {
     React,
+    PORTAL_TYPE,
+    mockDocument,
     slots,
     mutations,
     eventSources,
     fetchCalls,
     t,
+    tEn,
     setConfig(v) { configValue = v },
     setModels(v) { modelsValue = v },
     setModelsStatus(s) { currentModelsStatus = s },
@@ -230,6 +411,35 @@ async function loadClient({
     },
   }
 }
+
+test('injects scoped .dsh-ge-* styles into document.head and cleans up on disposeEffects, while tolerating DOM-less environments', async () => {
+  const env = await loadClient({ withDom: true })
+  const styleNodes = env.mockDocument.head.children.filter(node => node.tagName === 'style')
+  assert.equal(styleNodes.length, 1)
+  assert.equal(styleNodes[0].getAttribute('data-plugin'), 'dsh-gemini-enhancement')
+  const css = styleNodes[0].textContent
+  assert.ok(css.includes('.dsh-ge-dock-pill'))
+  assert.ok(css.includes('.dsh-ge-diag-panel'))
+  assert.ok(css.includes('.dsh-ge-xhigh-wrap'))
+  assert.ok(css.includes('.dsh-ge-xhigh'))
+  assert.ok(css.includes('.dsh-ge-xhigh-glyph'))
+  assert.ok(css.includes('.dsh-ge-xhigh-error'))
+  assert.ok(css.includes('.dsh-ge-model-opt-row'))
+  assert.ok(css.includes('.dsh-ge-model-opt-switch'))
+  assert.ok(css.includes('corner-shape: round'))
+  assert.ok(css.includes('.dsh-ge-search-row'))
+  assert.ok(css.includes('--dsw-alias-label-tertiary'))
+  assert.ok(css.includes('--dsw-alias-state-business-tertiary'))
+  assert.ok(css.includes('font-weight: 500'))
+  assert.ok(css.includes('border: none'))
+
+  env.disposeEffects()
+  assert.equal(env.mockDocument.head.children.length, 0)
+
+  // DOM-less test environment does not throw during apply or dispose.
+  const domless = await loadClient({ withDom: false, withReactDom: false })
+  domless.disposeEffects()
+})
 
 test('settings.models.provider-card renders in-place toggles only for eligible Gemini routes and links search -> nativeHistory', async () => {
   const env = await loadClient({
@@ -292,36 +502,388 @@ test('settings.models.provider-card renders in-place toggles only for eligible G
   })
 })
 
-test('composer status notice reflects per-provider active enhancements and turnTail extracts turn.turn', async () => {
+test('EnhancementNotice pill uses StatsPills classes, opens portaled diagnostics card with ?detail=1 SSE & projection, and surfaces warnings scoped by provider', async () => {
   const env = await loadClient({
+    trackSubscriptions: true,
     configValue: {
-      routes: { google: { localizePrompt: false, nativeHistory: true, googleSearch: true } },
+      routes: {
+        'my-gemini': { localizePrompt: true, nativeHistory: true, googleSearch: true },
+        google: { localizePrompt: false, nativeHistory: true, googleSearch: false },
+      },
       showStatusNotice: true,
     },
+    modelsValue: {
+      providers: {
+        'my-gemini': {
+          displayName: 'My Gemini Relay',
+          api: 'google-generative-ai',
+          baseURL: 'https://relay.test/v1beta',
+          models: [{ id: 'gemini-4-neon' }],
+        },
+      },
+    },
   })
-  const noticeSlot = env.slots.get('conversation.composer.dock:dsh-gemini-enhancement-notice')
-  const rendered = renderTree(noticeSlot.render({
-    sessionId: 'sess-1',
-    useProjection: () => 'google',
-    t: env.t,
-  }))
-  const texts = findAll(rendered, node => node.type === 'span' && typeof node.children?.[0] === 'string')
-  assert.ok(texts.some(node => node.children[0] === '原生历史 · Google 搜索'))
 
-  const turnSlot = env.slots.get('conversation.chat.turnTail:dsh-gemini-enhancement-search-cards')
-  const durableCard = { status: 'completed', queries: ['q1'], sources: [] }
-  const cardTree = renderTree(turnSlot.render({
-    sessionId: 'sess-1',
-    turn: { turn: 3 },
-    useProjection: (_key, select) => select({ 3: [durableCard] }),
-    t: env.t,
-  }))
-  assert.ok(cardTree !== null)
-  const listItems = findAll(cardTree, node => node.type === 'li')
-  assert.equal(listItems[0].children[0], 'q1')
+  const noticeSlot = env.slots.get('conversation.composer.dock:dsh-gemini-enhancement-notice')
+  const instance = createInstance()
+  let activeProvider = 'my-gemini'
+  let activeModel = 'gemini-4-neon'
+  let diagProjection = {
+    assistantSteps: 5,
+    consecutiveNative: 4,
+    nativeSteps: 4,
+    nativeBytes: 12288,
+    hasNativePayload: true,
+    promptLocalizedInLog: true,
+    searchCards: 2,
+    searchQueries: 4,
+    searchSources: 6,
+  }
+
+  const renderNotice = () => {
+    env.React.__beginRender(instance)
+    try {
+      const tree = renderTree(noticeSlot.render({
+        sessionId: 'sess-diag',
+        useProjection: (key, select) => {
+          if (key === 'modelSelection') return select({ next: { provider: activeProvider, model: activeModel } })
+          if (key === 'geminiEnhancementDiagnostics') return diagProjection
+          return undefined
+        },
+        t: env.t,
+      }))
+      return tree
+    } finally {
+      env.React.__endRender()
+      env.React.__flushEffects(instance)
+    }
+  }
+
+  let tree = renderNotice()
+  const btn = findAll(tree, n => n.type === 'button')[0]
+  assert.ok(btn)
+  assert.equal(btn.props.className, 'dsh-ge-dock-pill')
+  assert.equal(btn.props['aria-haspopup'], 'dialog')
+  assert.equal(btn.props['aria-expanded'], false)
+  assert.equal(btn.props.style, undefined)
+
+  // GeminiMark uses fine strokeWidth=1.6; labels use .dsh-ge-dock-sep instead of hardcoded secondary inline text.
+  const svg = findAll(btn, n => n.type === 'svg')[0]
+  assert.equal(svg.props.strokeWidth, 1.6)
+  const seps = findAll(btn, n => n.props?.className === 'dsh-ge-dock-sep')
+  assert.equal(seps.length, 2)
+  assert.equal(collectText(btn).join(''), '提示词汉化已匹配·原生历史·Google 搜索')
+
+  // Subscribed to ?detail=1 status SSE endpoint (and xhigh SSE for Neon/Hydrogen model).
+  assert.equal(env.eventSources.length, 2)
+  const statusStream = env.eventSources.find(es => es.url.includes('/status'))
+  const xhighStream = env.eventSources.find(es => es.url.includes('/xhigh'))
+  assert.equal(statusStream?.url, 'http://localhost/api/dsh-gemini-enhancement/status?sessionId=sess-diag&detail=1')
+  assert.equal(xhighStream?.url, 'http://localhost/api/dsh-gemini-enhancement/xhigh?sessionId=sess-diag')
+
+  // Emit detail=1 telemetry payload with warning-free state first.
+  statusStream.emit({
+    localizedProvider: 'my-gemini',
+    prompt: { provider: 'my-gemini', matched: 8, total: 9, missedBuiltins: ['tools:custom'] },
+    transport: {
+      provider: 'my-gemini',
+      model: 'gemini-4-neon',
+      status: 'ok',
+      host: 'relay.test',
+      totalHistoryTurns: 4,
+      replayedHistoryTurns: 3,
+      searchConfigured: true,
+      searchInjected: true,
+      searchMode: 'mixed',
+      localToolCount: 2,
+      xhighRequested: true,
+      xhighApplied: true,
+      thinkingLevel: 'XHIGH',
+      recordedBytes: 2048,
+      recordedFrames: 5,
+      recordStatus: 'saved',
+    },
+  })
+
+  tree = renderNotice()
+  let pill = findAll(tree, n => n.type === 'button')[0]
+  assert.equal(collectText(pill).join(''), '提示词已汉化·原生历史·Google 搜索')
+  assert.equal(findAll(pill, n => n.props?.className === 'dsh-ge-dock-warn-dot').length, 0)
+
+  // Click opens portaled diagnostic dialog on document.body.
+  pill.props.onClick()
+  tree = renderNotice()
+  pill = findAll(tree, n => n.type === 'button')[0]
+  assert.equal(pill.props['aria-expanded'], true)
+  const portal = findAll(tree, n => n.type === env.PORTAL_TYPE)[0]
+  assert.ok(portal, 'dialog must be portaled')
+  assert.equal(portal.props.target, env.mockDocument.body)
+
+  const dialog = findAll(portal, n => n.props?.role === 'dialog')[0]
+  assert.ok(dialog)
+  assert.equal(dialog.props.className, 'dsh-ge-diag-panel')
+  const dialogText = collectText(dialog).join(' ')
+  assert.ok(dialogText.includes('My Gemini Relay / gemini-4-neon'))
+  assert.ok(dialogText.includes('已替换 8 / 9 段'))
+  assert.ok(dialogText.includes('tools:custom'))
+  assert.ok(dialogText.includes('命中 3/4 轮 (部分回退) · 累计 12KB'))
+  assert.ok(dialogText.includes('已自动排除上传'))
+  assert.ok(dialogText.includes('混用 2 个本地工具 · 本会话 2 次'))
+  assert.ok(dialogText.includes('XHIGH（会话覆盖）'))
+
+  // Emit warning status (url-mismatch) -> shows 5px warning dot on pill + warning banner in dialog.
+  statusStream.emit({
+    localizedProvider: 'my-gemini',
+    prompt: null,
+    transport: {
+      provider: 'my-gemini',
+      model: 'gemini-4-neon',
+      status: 'url-mismatch',
+      host: 'relay.test',
+      totalHistoryTurns: 0,
+      replayedHistoryTurns: 0,
+      searchConfigured: true,
+      searchInjected: false,
+      searchMode: 'skipped',
+      localToolCount: 1,
+      xhighRequested: false,
+      xhighApplied: false,
+      thinkingLevel: null,
+      recordedBytes: 0,
+      recordedFrames: 0,
+      recordStatus: 'overflow',
+    },
+  })
+  tree = renderNotice()
+  pill = findAll(tree, n => n.type === 'button')[0]
+  assert.equal(findAll(pill, n => n.props?.className === 'dsh-ge-dock-warn-dot').length, 1)
+  const warnText = collectText(findAll(tree, n => n.props?.role === 'dialog')[0]).join(' ')
+  assert.ok(warnText.includes('未能匹配 /v1beta 请求路径'))
+  assert.ok(warnText.includes('2 MiB'))
+  assert.ok(warnText.includes('toolConfig'))
+
+  // Switching provider to 'google' must NOT inherit 'my-gemini' telemetry or warning dot.
+  activeProvider = 'google'
+  activeModel = 'gemini-4-argon'
+  tree = renderNotice()
+  pill = findAll(tree, n => n.type === 'button')[0]
+  assert.equal(findAll(pill, n => n.props?.className === 'dsh-ge-dock-warn-dot').length, 0)
+  assert.equal(collectText(pill).join(''), '原生历史')
+
+  // Legacy plain-string SSE payload (JSON-encoded string) remains safe.
+  activeProvider = 'my-gemini'
+  statusStream.emit(JSON.stringify('my-gemini'))
+  tree = renderNotice()
+  assert.ok(collectText(findAll(tree, n => n.type === 'button')[0]).join('').includes('提示词已汉化'))
+
+  // Empty stats + no live telemetry shows gentle hint when open.
+  diagProjection = undefined
+  statusStream.emit(null)
+  tree = renderNotice()
+  findAll(tree, n => n.type === 'button')[0].props.onClick()
+  tree = renderNotice()
+  const emptyDialogText = collectText(findAll(tree, n => n.props?.role === 'dialog')[0]).join(' ')
+  assert.ok(emptyDialogText.includes('发出首条消息后显示实时覆盖详情'))
+
+  env.React.__unmount(instance)
+  env.disposeEffects()
+  assert.equal(statusStream.closed, true)
+  assert.equal(xhighStream.closed, true)
 })
 
-test('conversation.input.right xhigh toggle visibility across Gemini routes, models, efforts, and fallback store', async () => {
+test('EnhancementNotice dialog closes on Escape, outside pointerdown, and capture click, and gracefully skips portal without ReactDOM', async () => {
+  const env = await loadClient({
+    configValue: { routes: { google: { localizePrompt: false, nativeHistory: true, googleSearch: false } }, showStatusNotice: true },
+    supportsAnchor: false,
+  })
+  const noticeSlot = env.slots.get('conversation.composer.dock:dsh-gemini-enhancement-notice')
+  const instance = createInstance()
+  const rootEl = {
+    contains: target => target === 'inside-root',
+    getBoundingClientRect: () => ({ left: 48, top: 640, right: 200, bottom: 664 }),
+  }
+  const panelEl = {
+    contains: target => target === 'inside-panel',
+  }
+
+  const renderNotice = () => {
+    env.React.__beginRender(instance)
+    try {
+      const tree = renderTree(noticeSlot.render({
+        sessionId: 'sess-dismiss',
+        useProjection: (key, select) => key === 'modelSelection' ? select({ next: { provider: 'google', model: 'gemini-4' } }) : undefined,
+        t: env.t,
+      }))
+      // Bind mock DOM elements to the refs allocated by useDiagDialog.
+      const anchor = tree
+      if (anchor?.props?.ref) anchor.props.ref.current = rootEl
+      const portal = findAll(tree, n => n.type === env.PORTAL_TYPE)[0]
+      const dialog = portal ? findAll(portal, n => n.props?.role === 'dialog')[0] : null
+      if (dialog?.props?.ref) dialog.props.ref.current = panelEl
+      return tree
+    } finally {
+      env.React.__endRender()
+      env.React.__flushEffects(instance)
+    }
+  }
+
+  // Open dialog and verify fallback positioning without CSS.supports('anchor-name').
+  let tree = renderNotice()
+  findAll(tree, n => n.type === 'button')[0].props.onClick()
+  tree = renderNotice()
+  // Second render after layout effect picks up fallbackPos.
+  tree = renderNotice()
+  const dialog = findAll(tree, n => n.props?.role === 'dialog')[0]
+  assert.equal(dialog.props.style.left, '48px')
+  assert.equal(dialog.props.style.bottom, '168px')
+  assert.equal(dialog.props.style.top, 'auto')
+
+  // Inside pointerdown / click keeps dialog open.
+  env.mockDocument.dispatch('pointerdown', { target: 'inside-panel' })
+  env.mockDocument.dispatch('click', { target: 'inside-root' }, { captureOnly: true })
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
+
+  // Capture-phase outside click (e.g. clicking sibling DSH pill) closes dialog immediately.
+  env.mockDocument.dispatch('click', { target: 'sibling-pill' }, { captureOnly: true })
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+
+  // Reopen, then outside pointerdown closes.
+  findAll(tree, n => n.type === 'button')[0].props.onClick()
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
+  env.mockDocument.dispatch('pointerdown', { target: 'outside-area' })
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+
+  // Reopen, then Escape closes.
+  findAll(tree, n => n.type === 'button')[0].props.onClick()
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
+  env.mockDocument.dispatch('keydown', { key: 'Escape' })
+  tree = renderNotice()
+  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+
+  // Without ReactDOM/document.body, toggling open does not crash and omits portal.
+  const noPortalEnv = await loadClient({
+    configValue: { routes: { google: { localizePrompt: false, nativeHistory: true, googleSearch: false } }, showStatusNotice: true },
+    withDom: false,
+    withReactDom: false,
+  })
+  const noPortalSlot = noPortalEnv.slots.get('conversation.composer.dock:dsh-gemini-enhancement-notice')
+  const noPortalInst = createInstance()
+  noPortalEnv.React.__beginRender(noPortalInst)
+  let noPortalTree = renderTree(noPortalSlot.render({
+    sessionId: 'sess-noportal',
+    useProjection: (key, select) => key === 'modelSelection' ? select({ next: { provider: 'google' } }) : undefined,
+    t: noPortalEnv.t,
+  }))
+  noPortalEnv.React.__endRender()
+  findAll(noPortalTree, n => n.type === 'button')[0].props.onClick()
+  noPortalEnv.React.__beginRender(noPortalInst)
+  noPortalTree = renderTree(noPortalSlot.render({
+    sessionId: 'sess-noportal',
+    useProjection: (key, select) => key === 'modelSelection' ? select({ next: { provider: 'google' } }) : undefined,
+    t: noPortalEnv.t,
+  }))
+  noPortalEnv.React.__endRender()
+  assert.equal(findAll(noPortalTree, n => n.props?.role === 'dialog').length, 0)
+})
+
+test('LiveSearchActivity uses compact dock pill classes and GoogleSearchCard renders DisclosureRow + WebBlock while suppressing redirect host', async () => {
+  const env = await loadClient({ trackSubscriptions: true })
+  const liveSlot = env.slots.get('conversation.composer.dock:dsh-gemini-enhancement-search-live')
+  const liveInst = createInstance()
+  const renderLive = () => {
+    env.React.__beginRender(liveInst)
+    try {
+      return renderTree(liveSlot.render({ sessionId: 'sess-live', t: env.t }))
+    } finally {
+      env.React.__endRender()
+    }
+  }
+  assert.equal(renderLive(), null)
+  env.eventSources[0].emit({
+    liveTurn: 1,
+    cards: [{ turn: 1, status: 'running', queries: ['q'], sources: [] }],
+  })
+  const liveTree = renderLive()
+  assert.equal(liveTree.props.className, 'dsh-ge-dock-anchor')
+  const livePill = findAll(liveTree, n => n.props?.role === 'status')[0]
+  assert.equal(livePill.props.className, 'dsh-ge-dock-pill')
+  assert.equal(collectText(livePill).join(''), 'Google 搜索中…')
+
+  const turnSlot = env.slots.get('conversation.chat.turnTail:dsh-gemini-enhancement-search-cards')
+  const cardInst = createInstance()
+  const durableCards = [{
+    status: 'completed',
+    queries: ['gemini 4 search', 'dsh ui'],
+    sources: [
+      {
+        url: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc',
+        title: 'github.com',
+      },
+      {
+        url: 'https://docs.python.org/3/',
+        title: 'Python Docs',
+      },
+    ],
+  }]
+
+  const renderCard = () => {
+    env.React.__beginRender(cardInst)
+    try {
+      return renderTree(turnSlot.render({
+        sessionId: 'sess-live',
+        turn: { turn: 3 },
+        useProjection: (_key, select) => select({ 3: durableCards }),
+        t: env.t,
+      }))
+    } finally {
+      env.React.__endRender()
+    }
+  }
+
+  // Collapsed by default as DisclosureRow; no <details> hard border, no body mounted yet.
+  let cardTree = renderCard()
+  assert.equal(cardTree.props.className, 'dsh-ge-search-root')
+  assert.equal(findAll(cardTree, n => n.type === 'details').length, 0)
+  let rowBtn = findAll(cardTree, n => n.type === 'button' && n.props.className === 'dsh-ge-search-row')[0]
+  assert.ok(rowBtn)
+  assert.equal(rowBtn.props['aria-expanded'], false)
+  assert.equal(findAll(cardTree, n => n.props?.className === 'dsh-ge-search-body').length, 0)
+  assert.ok(collectText(rowBtn).join('').includes('Google 搜索'))
+  assert.ok(collectText(rowBtn).join('').includes('搜索词 2 · 来源 2'))
+
+  // Click row to expand body with query tags and <ol> sources.
+  rowBtn.props.onClick()
+  cardTree = renderCard()
+  rowBtn = findAll(cardTree, n => n.type === 'button' && n.props.className === 'dsh-ge-search-row')[0]
+  assert.equal(rowBtn.props['aria-expanded'], true)
+  const body = findAll(cardTree, n => n.props?.className === 'dsh-ge-search-body')[0]
+  assert.ok(body)
+  assert.equal(body.props['data-web'], 'search')
+
+  const queryTags = findAll(body, n => n.props?.className === 'dsh-ge-search-query-tag')
+  assert.deepEqual(queryTags.map(tag => tag.children[0]), ['gemini 4 search', 'dsh ui'])
+
+  const ol = findAll(body, n => n.type === 'ol' && n.props.className === 'dsh-ge-search-sources')[0]
+  assert.ok(ol)
+  const listItems = findAll(ol, n => n.type === 'li')
+  assert.equal(listItems.length, 2)
+
+  // Redirect host vertexaisearch.cloud.google.com must NEVER be rendered in visible text!
+  const allVisibleText = collectText(cardTree).join(' ')
+  assert.ok(allVisibleText.includes('github.com'))
+  assert.equal(allVisibleText.includes('vertexaisearch.cloud.google.com'), false)
+  // Non-redirect source with distinct title shows its host subtly.
+  assert.ok(allVisibleText.includes('docs.python.org'))
+
+  env.disposeEffects()
+})
+
+test('conversation.input.model.options and conversation.input.right xhigh visibility across Gemini routes, models, efforts, and fallback store', async () => {
   const env = await loadClient({
     modelsValue: {
       providers: {
@@ -341,15 +903,21 @@ test('conversation.input.right xhigh toggle visibility across Gemini routes, mod
     subagentSessions: new Set(['sub-addressed']),
   })
 
-  const xhighSlot = env.slots.get('conversation.input.right:dsh-gemini-enhancement-xhigh')
-  assert.ok(xhighSlot, 'xhigh slot should be registered under conversation.input.right')
-  assert.equal(xhighSlot.meta.order, 100)
-  assert.equal(xhighSlot.meta.locale, 'dshGeminiEnhancement')
+  const optionSlot = env.slots.get('conversation.input.model.options:dsh-gemini-enhancement-xhigh')
+  assert.ok(optionSlot, 'xhigh option should be registered under conversation.input.model.options')
+  assert.equal(optionSlot.meta.order, -10)
+  assert.equal(optionSlot.meta.locale, 'dshGeminiEnhancement')
 
-  const renderFor = ({ sessionId = 'sess-1', selection, includeStore = true, sessionSnap, sessionsState }) => {
-    const injected = includeStore ? xhighSlot.meta.inject(sessionId) : {}
-    return renderTree(xhighSlot.render({
+  const chipSlot = env.slots.get('conversation.input.right:dsh-gemini-enhancement-xhigh')
+  assert.ok(chipSlot, 'xhigh active chip should be registered under conversation.input.right')
+  assert.equal(chipSlot.meta.order, 100)
+  assert.equal(chipSlot.meta.locale, 'dshGeminiEnhancement')
+
+  const renderSlotFor = (slot, { sessionId = 'sess-1', selection, includeStore = true, sessionSnap, sessionsState, locked = false }) => {
+    const injected = includeStore ? slot.meta.inject(sessionId) : {}
+    return renderTree(slot.render({
       sessionId,
+      locked,
       useProjection: (_key, select) => select(selection ? { next: selection } : undefined),
       useSession: select => select(sessionSnap),
       useSessions: select => select(sessionsState),
@@ -358,7 +926,8 @@ test('conversation.input.right xhigh toggle visibility across Gemini routes, mod
     }))
   }
 
-  // Visible for Gemini API + Neon/Hydrogen regardless of native reasoning effort (low / medium / high / unset).
+  // Model menu option renders switch for Gemini API + Neon/Hydrogen regardless of native effort,
+  // while the toolbar active chip stays hidden (null) when XHigh is off.
   for (const selection of [
     { provider: 'google', model: 'gemini-4-neon', reasoningEffort: 'low' },
     { provider: 'google', model: 'gemini-4-neon', reasoningEffort: 'medium' },
@@ -369,18 +938,22 @@ test('conversation.input.right xhigh toggle visibility across Gemini routes, mod
     { provider: 'my-gemini', model: 'gemini-4-hydrogen@2026', reasoningEffort: 'high' },
     { provider: 'my-gemini', model: 'gemini-4-hydrogen' },
   ]) {
-    const tree = renderFor({ selection })
-    assert.ok(tree !== null, `expected toggle to render for ${JSON.stringify(selection)}`)
-    assert.equal(tree.type, 'button')
-    assert.equal(tree.props.type, 'button')
-    assert.equal(tree.props['aria-pressed'], false)
-    const labelSpan = findAll(tree, node => node.type === 'span' && node.children?.[0] === 'XHigh')
-    assert.equal(labelSpan.length, 1)
+    const optionTree = renderSlotFor(optionSlot, { selection })
+    assert.ok(optionTree !== null, `expected model option to render for ${JSON.stringify(selection)}`)
+    assert.equal(optionTree.props.className, 'dsh-ge-model-opt-row')
+    const sw = findAll(optionTree, node => node.type === 'button' && node.props.role === 'switch')[0]
+    assert.ok(sw, 'model option must render a role="switch" button')
+    assert.equal(sw.props['aria-checked'], false)
+    assert.equal(sw.props.className, 'dsh-ge-model-opt-switch')
+    assert.equal(collectText(optionTree).join(''), 'XHigh 推理覆盖')
+
+    assert.equal(renderSlotFor(chipSlot, { selection }), null, 'toolbar chip must stay hidden when XHigh is off')
   }
 
   // Falls back to modelStore.current when modelSelection projection is empty (new chat default).
-  const fallbackTree = renderFor({ selection: undefined })
-  assert.ok(fallbackTree !== null && fallbackTree.type === 'button')
+  const fallbackOption = renderSlotFor(optionSlot, { selection: undefined })
+  assert.ok(fallbackOption !== null && findAll(fallbackOption, n => n.props?.role === 'switch').length === 1)
+  assert.equal(renderSlotFor(chipSlot, { selection: undefined }), null)
 
   // Hidden for non-Neon/Hydrogen models, non-Gemini routes, and missing sessionId.
   for (const selection of [
@@ -391,29 +964,35 @@ test('conversation.input.right xhigh toggle visibility across Gemini routes, mod
     { provider: 'my-openai', model: 'gemini-4-neon', reasoningEffort: 'high' },
     { provider: 'my-openai', model: 'gemini-4-hydrogen' },
   ]) {
-    assert.equal(renderFor({ selection }), null, `expected null for ${JSON.stringify(selection)}`)
+    assert.equal(renderSlotFor(optionSlot, { selection }), null, `expected null for ${JSON.stringify(selection)}`)
+    assert.equal(renderSlotFor(chipSlot, { selection }), null)
   }
-  assert.equal(renderFor({ sessionId: '', selection: { provider: 'google', model: 'gemini-4-neon' } }), null)
+  assert.equal(renderSlotFor(optionSlot, { sessionId: '', selection: { provider: 'google', model: 'gemini-4-neon' } }), null)
+  assert.equal(renderSlotFor(chipSlot, { sessionId: '', selection: { provider: 'google', model: 'gemini-4-neon' } }), null)
 
   // Hidden wherever the model selector itself is hidden (addressed/snapshot/listed subagent sessions).
   const neon = { provider: 'google', model: 'gemini-4-neon', reasoningEffort: 'high' }
-  assert.equal(renderFor({ sessionId: 'sub-addressed', selection: neon }), null)
-  assert.equal(renderFor({ selection: neon, sessionSnap: { subagent: { address: { mode: 'continuable' } } } }), null)
-  assert.equal(renderFor({ selection: neon, sessionsState: { byId: { 'sess-1': { origin: 'subagent' } } } }), null)
+  assert.equal(renderSlotFor(optionSlot, { sessionId: 'sub-addressed', selection: neon }), null)
+  assert.equal(renderSlotFor(optionSlot, { selection: neon, sessionSnap: { subagent: { address: { mode: 'continuable' } } } }), null)
+  assert.equal(renderSlotFor(optionSlot, { selection: neon, sessionsState: { byId: { 'sess-1': { origin: 'subagent' } } } }), null)
+  assert.equal(renderSlotFor(chipSlot, { sessionId: 'sub-addressed', selection: neon }), null)
+  assert.equal(renderSlotFor(chipSlot, { selection: neon, sessionSnap: { subagent: { address: { mode: 'continuable' } } } }), null)
+  assert.equal(renderSlotFor(chipSlot, { selection: neon, sessionsState: { byId: { 'sess-1': { origin: 'subagent' } } } }), null)
 
-  // Disabled when the session is removed (matching ModelSelect's locked state).
-  const removedBtn = renderFor({ selection: neon, sessionSnap: { subagent: null, removed: true } })
-  assert.ok(removedBtn !== null && removedBtn.type === 'button')
-  assert.equal(removedBtn.props.disabled, true)
+  // Disabled when the session is removed or when ModelSelect passes locked=true.
+  const removedOpt = renderSlotFor(optionSlot, { selection: neon, sessionSnap: { subagent: null, removed: true } })
+  assert.equal(findAll(removedOpt, n => n.props?.role === 'switch')[0].props.disabled, true)
+  const lockedOpt = renderSlotFor(optionSlot, { selection: neon, locked: true })
+  assert.equal(findAll(lockedOpt, n => n.props?.role === 'switch')[0].props.disabled, true)
 
   // When models form is not ready, allow built-in google only and reject non-google routes.
   env.setModelsStatus('loading')
-  assert.ok(renderFor({ selection: { provider: 'google', model: 'gemini-4-neon' } }) !== null)
-  assert.equal(renderFor({ selection: { provider: 'my-openai', model: 'gemini-4-neon' } }), null)
-  assert.equal(renderFor({ selection: { provider: 'my-gemini', model: 'gemini-4-neon' } }), null)
+  assert.ok(renderSlotFor(optionSlot, { selection: { provider: 'google', model: 'gemini-4-neon' } }) !== null)
+  assert.equal(renderSlotFor(optionSlot, { selection: { provider: 'my-openai', model: 'gemini-4-neon' } }), null)
+  assert.equal(renderSlotFor(optionSlot, { selection: { provider: 'my-gemini', model: 'gemini-4-neon' } }), null)
 })
 
-test('conversation.input.right xhigh toggle syncs via SSE, posts toggle without mutating modelSelection, guards busy, and cleans up EventSource', async () => {
+test('XHighModelOption switch and XHighActiveChip share SSE sync, render PlanChip-aligned active chip only when ON, handle failures/busy, and clean up EventSource', async () => {
   let pendingResolve = null
   let failNext = false
   const env = await loadClient({
@@ -444,58 +1023,63 @@ test('conversation.input.right xhigh toggle syncs via SSE, posts toggle without 
     },
   })
 
-  const xhighSlot = env.slots.get('conversation.input.right:dsh-gemini-enhancement-xhigh')
-  const instance = { hookIndex: 0, states: {}, refs: {}, subs: {}, notified: 0 }
+  const optionSlot = env.slots.get('conversation.input.model.options:dsh-gemini-enhancement-xhigh')
+  const chipSlot = env.slots.get('conversation.input.right:dsh-gemini-enhancement-xhigh')
+  const optionInst = createInstance()
+  const chipInst = createInstance()
   const modelSelectionChanges = []
-  const injected = xhighSlot.meta.inject('sess-xhigh')
+  const reportedFailures = []
+  const injectedOption = optionSlot.meta.inject('sess-xhigh')
+  const injectedChip = chipSlot.meta.inject('sess-xhigh')
 
-  const renderToggle = () => {
-    env.React.__beginRender(instance)
+  const renderOption = () => {
+    env.React.__beginRender(optionInst)
     try {
-      return renderTree(xhighSlot.render({
+      return renderTree(optionSlot.render({
         sessionId: 'sess-xhigh',
+        locked: false,
+        reportFailure: msg => reportedFailures.push(msg),
         useProjection: (key, select) => {
           assert.equal(key, 'modelSelection')
           return select({ next: { provider: 'my-gemini', model: 'gemini-4-neon', reasoningEffort: 'low' } })
         },
         setModelSelection: () => { modelSelectionChanges.push('called') },
         t: env.t,
-        ...injected,
+        ...injectedOption,
       }))
     } finally {
       env.React.__endRender()
     }
   }
 
-  // Initial render opens SSE stream for sess-xhigh and renders off state.
-  let btn = renderToggle()
-  assert.equal(btn.type, 'button')
-  assert.equal(btn.props['aria-pressed'], false)
-  assert.equal(btn.props.title, '在当前会话将推理等级覆盖为 XHigh（Neon / Hydrogen），不改变原生档位')
+  const renderChip = () => {
+    env.React.__beginRender(chipInst)
+    try {
+      return renderTree(chipSlot.render({
+        sessionId: 'sess-xhigh',
+        useProjection: (key, select) => {
+          assert.equal(key, 'modelSelection')
+          return select({ next: { provider: 'my-gemini', model: 'gemini-4-neon', reasoningEffort: 'low' } })
+        },
+        t: env.t,
+        ...injectedChip,
+      }))
+    } finally {
+      env.React.__endRender()
+    }
+  }
+
+  // Initial render: both subscribe to ONE shared SSE stream; chip returns null while off, option shows unchecked switch.
+  let optRow = renderOption()
+  let sw = findAll(optRow, n => n.type === 'button' && n.props.role === 'switch')[0]
+  assert.equal(sw.props['aria-checked'], false)
+  assert.equal(sw.props.title, '在当前会话将推理等级覆盖为 XHigh（Neon / Hydrogen），不改变原生档位')
+  assert.equal(renderChip(), null)
   assert.equal(env.eventSources.length, 1)
   assert.equal(env.eventSources[0].url, 'http://localhost/api/dsh-gemini-enhancement/xhigh?sessionId=sess-xhigh')
 
-  // onMouseDown prevents stealing composer input focus.
-  let prevented = false
-  btn.props.onMouseDown({ preventDefault() { prevented = true } })
-  assert.equal(prevented, true)
-
-  // SSE push {"enabled":true} updates aria-pressed, title, and active styling.
-  env.eventSources[0].emit({ enabled: true })
-  assert.ok(instance.notified >= 1)
-  btn = renderToggle()
-  assert.equal(btn.props['aria-pressed'], true)
-  assert.equal(btn.props.title, '当前会话已开启 XHigh（覆盖当前所选档位），点击恢复原档位')
-  assert.equal(btn.props.style.background, 'var(--dsw-alias-state-business-tertiary)')
-  assert.equal(btn.props.style.color, 'var(--dsw-alias-state-business-primary)')
-
-  // SSE push {"enabled":false} (e.g., Host auto-disabled after switching model/effort) restores off state.
-  env.eventSources[0].emit({ enabled: false })
-  btn = renderToggle()
-  assert.equal(btn.props['aria-pressed'], false)
-
-  // Clicking when off sends POST ./api/dsh-gemini-enhancement/xhigh with {sessionId, enabled: true}.
-  await btn.props.onClick()
+  // Clicking switch sends POST {sessionId, enabled: true}; both switch and toolbar chip update synchronously.
+  await sw.props.onClick()
   assert.equal(env.fetchCalls.length, 1)
   assert.equal(env.fetchCalls[0].url, 'http://localhost/api/dsh-gemini-enhancement/xhigh')
   assert.equal(env.fetchCalls[0].options.method, 'POST')
@@ -504,27 +1088,70 @@ test('conversation.input.right xhigh toggle syncs via SSE, posts toggle without 
   assert.equal(env.mutations.length, 0)
   assert.equal(modelSelectionChanges.length, 0)
 
-  btn = renderToggle()
-  assert.equal(btn.props['aria-pressed'], true)
+  optRow = renderOption()
+  sw = findAll(optRow, n => n.type === 'button' && n.props.role === 'switch')[0]
+  assert.equal(sw.props['aria-checked'], true)
 
-  // Busy guard prevents duplicate POST while a toggle request is in-flight.
+  let chipWrap = renderChip()
+  assert.ok(chipWrap !== null && chipWrap.props.className === 'dsh-ge-xhigh-wrap')
+  assert.equal(findAll(chipWrap, n => n.props?.role === 'status').length, 0)
+  let chip = findAll(chipWrap, n => n.type === 'button' && n.props.className === 'dsh-ge-xhigh')[0]
+  assert.ok(chip)
+  assert.equal(chip.props.style, undefined)
+  assert.equal(chip.props.title, '当前会话已开启 XHigh 覆盖 — 点击关闭')
+  assert.deepEqual(collectText(chip), ['XHigh'])
+  const svgs = findAll(chip, n => n.type === 'svg')
+  assert.equal(svgs.length, 2, 'active chip renders rest GeminiMark and hover CloseCircleFillIcon')
+  assert.equal(svgs[0].props.className, 'dsh-ge-xhigh-rest-glyph')
+  assert.equal(svgs[0].props.strokeWidth, 1.6)
+  assert.equal(svgs[1].props.className, 'dsh-ge-xhigh-hover-glyph')
+
+  // onMouseDown on chip prevents stealing composer input focus.
+  let prevented = false
+  chip.props.onMouseDown({ preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+
+  // Clicking active chip when POST fails renders inline status error beside chip while preserving ON state.
+  failNext = true
+  await chip.props.onClick()
+  chipWrap = renderChip()
+  const errEl = findAll(chipWrap, n => n.props?.className === 'dsh-ge-xhigh-error' && n.props?.role === 'status')[0]
+  assert.ok(errEl, 'failed exit click must display inline status feedback')
+  assert.equal(collectText(errEl).join(''), '未能切换 XHigh 推理覆盖，请重试。')
+  chip = findAll(chipWrap, n => n.type === 'button' && n.props.className === 'dsh-ge-xhigh')[0]
+
+  // Clicking active chip turns XHigh off -> unmounts chip back to null and unchecks switch.
   pendingResolve = () => {}
-  const firstClick = btn.props.onClick()
-  const secondClick = btn.props.onClick()
-  assert.equal(env.fetchCalls.length, 2, 'second click while busy must be ignored')
-  assert.deepEqual(JSON.parse(env.fetchCalls[1].options.body), { sessionId: 'sess-xhigh', enabled: false })
+  const firstClick = chip.props.onClick()
+  const secondClick = chip.props.onClick()
+  assert.equal(env.fetchCalls.length, 3, 'second click while busy must be ignored')
+  assert.deepEqual(JSON.parse(env.fetchCalls[2].options.body), { sessionId: 'sess-xhigh', enabled: false })
   pendingResolve()
   pendingResolve = null
   await Promise.all([firstClick, secondClick])
 
-  btn = renderToggle()
-  assert.equal(btn.props['aria-pressed'], false)
+  assert.equal(renderChip(), null)
+  optRow = renderOption()
+  sw = findAll(optRow, n => n.type === 'button' && n.props.role === 'switch')[0]
+  assert.equal(sw.props['aria-checked'], false)
 
-  // POST network failure silently preserves current state without throwing.
+  // SSE push {"enabled":true} / {"enabled":false} notifies both subscribers and updates UI.
+  env.eventSources[0].emit({ enabled: true })
+  assert.ok(optionInst.notified >= 1)
+  assert.ok(chipInst.notified >= 1)
+  assert.ok(renderChip() !== null)
+  env.eventSources[0].emit({ enabled: false })
+  assert.equal(renderChip(), null)
+
+  // POST network failure from option reports failure via reportFailure without throwing or changing state.
   failNext = true
-  await btn.props.onClick()
-  btn = renderToggle()
-  assert.equal(btn.props['aria-pressed'], false)
+  optRow = renderOption()
+  sw = findAll(optRow, n => n.type === 'button' && n.props.role === 'switch')[0]
+  await sw.props.onClick()
+  assert.deepEqual(reportedFailures, ['未能切换 XHigh 推理覆盖，请重试。'])
+  optRow = renderOption()
+  assert.equal(findAll(optRow, n => n.props?.role === 'switch')[0].props['aria-checked'], false)
+  assert.equal(renderChip(), null)
   assert.equal(env.mutations.length, 0)
   assert.equal(modelSelectionChanges.length, 0)
 

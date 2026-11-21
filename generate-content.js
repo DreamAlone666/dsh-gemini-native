@@ -447,13 +447,17 @@ export function patchGenerateContentBody(body, request, route) {
   let pendingCalls = null
   let requiresCirculation = false
   let contentsChanged = false
+  let totalModelTurns = 0
+  let replayedModelTurns = 0
 
   for (const entry of body.contents) {
     if (entry?.role === 'model' && Array.isArray(entry.parts)) {
+      totalModelTurns++
       pendingCalls = null
       const prefix = historyFingerprint(patchedContents, systemParts)
       const match = findNativeAssistant(assistants, assistantCursor, request, route, prefix, entry.parts, allowCirculation)
       if (match) {
+        replayedModelTurns++
         assistantCursor = match.index + 1
         const { parts, calls, local } = match.native
         requiresCirculation ||= parts.some(part => nativeKeys.some(key => Object.hasOwn(part, key)))
@@ -515,5 +519,7 @@ export function patchGenerateContentBody(body, request, route) {
     body: tools.body,
     changed: contentsChanged || tools.changed,
     prefix: nextPrefix,
+    totalModelTurns,
+    replayedModelTurns,
   }
 }

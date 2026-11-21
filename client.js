@@ -2,6 +2,8 @@ window.__ModuleLoader__.load({
   id: 'dsh-gemini-enhancement',
   factory(require) {
     const React = require('react')
+    let ReactDOM = null
+    try { ReactDOM = require('react-dom') } catch { ReactDOM = null }
     const h = React.createElement
     const namespace = 'dshGeminiEnhancement'
     const pluginId = 'dsh-gemini-enhancement'
@@ -35,17 +37,55 @@ window.__ModuleLoader__.load({
       statusNativeHistory: 'Native history',
       statusGoogleSearch: 'Google Search',
       source: 'Source: Gemini Enhancement plugin',
-      activityTitle: 'Google Search (Gemini)',
+      activityTitle: 'Google Search',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
       activityIncomplete: 'Search completion not confirmed',
       activityPartial: 'Some searches were not confirmed complete',
       activityQueries: 'Search queries',
       activitySourceCount: 'Sources',
-      activitySources: 'Sources returned by Google (links open in a new tab)',
+      activitySources: 'Sources',
+      activitySourceFallback: 'Web source',
       xhighLabel: 'XHigh',
-      xhighOffTitle: 'Override reasoning level to XHigh for this session (Neon / Hydrogen) without changing the native effort setting',
-      xhighOnTitle: 'XHigh is active for this session (overriding the selected effort); click to restore',
+      xhighOptionLabel: 'XHigh effort override',
+      xhighOptionTitle: 'Override reasoning level to XHigh for this session (Neon / Hydrogen) without changing the native effort setting',
+      xhighOnTitle: 'XHigh override is active for this session — click to turn off',
+      xhighToggleFailed: 'Could not update XHigh effort override. Please try again.',
+      diagWarningBadge: 'Warning',
+      diagWarnUrlMismatch: 'Could not match /v1beta request path (check provider baseURL).',
+      diagWarnRecordOverflow: 'Last response exceeded the 2 MiB native recording limit; skipped recording for this turn.',
+      diagWarnRecordInvalid: 'Last response SSE frames were invalid; skipped native recording.',
+      diagWarnSearchSkipped: 'Incompatible toolConfig present; native Google Search was not injected.',
+      diagPromptLabel: 'Prompt localization',
+      diagPromptMatchedTpl: 'Replaced {matched} / {total}',
+      diagPromptMissedTpl: 'Unmatched built-ins: {names}',
+      diagPromptLogZh: 'Log prompt is Chinese',
+      diagPromptLogEn: 'Log prompt is English',
+      diagPromptPending: 'Awaiting request',
+      diagHistoryLabel: 'Native history',
+      diagHistoryReplayHitTpl: 'Matched {replayed}/{total} turns',
+      diagHistoryPartialFallback: 'partial fallback',
+      diagHistoryCumulativeTpl: 'total {size}',
+      diagHistoryLastTurnTpl: 'last turn {size}',
+      diagHistoryDurableTpl: '{consecutive} / {total} steps · {size}',
+      diagHistoryNoneInSession: 'No native records in session',
+      diagHistoryEmpty: 'No native turns recorded yet',
+      diagLogUploadLabel: 'Official log',
+      diagLogExcluded: 'Auto-excluded from upload',
+      diagLogAutoExclude: 'Auto-excluded if native data present',
+      diagSearchLabel: 'Google Search',
+      diagSearchMixedTpl: 'Mixed with {count} local tools',
+      diagSearchOnly: 'Native search only',
+      diagSearchSessionCountTpl: '{cards} in session',
+      diagSearchDurableSummaryTpl: '{cards} runs · {queries} queries · {sources} sources',
+      diagSearchSkippedValue: 'Skipped (toolConfig conflict)',
+      diagSearchReady: 'Ready (awaiting call)',
+      diagThinkingLabel: 'Thinking',
+      diagThinkingXHighApplied: 'XHIGH (session override)',
+      diagThinkingXHighPending: 'XHigh override on (pending)',
+      diagThinkingNative: 'Follows native effort',
+      diagThinkingNativeWithLevelTpl: '{level} (native effort)',
+      diagEmptyHint: 'Send a message to view live override details.',
     }
 
     const zh = {
@@ -77,18 +117,605 @@ window.__ModuleLoader__.load({
       statusNativeHistory: '原生历史',
       statusGoogleSearch: 'Google 搜索',
       source: '来源：Gemini 增强插件',
-      activityTitle: 'Google 搜索（Gemini）',
+      activityTitle: 'Google 搜索',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
       activityIncomplete: '未确认搜索完成',
       activityPartial: '部分搜索未确认完成',
       activityQueries: '搜索词',
       activitySourceCount: '来源',
-      activitySources: 'Google 返回的来源（在新标签页打开）',
+      activitySources: '来源',
+      activitySourceFallback: '网页来源',
       xhighLabel: 'XHigh',
-      xhighOffTitle: '在当前会话将推理等级覆盖为 XHigh（Neon / Hydrogen），不改变原生档位',
-      xhighOnTitle: '当前会话已开启 XHigh（覆盖当前所选档位），点击恢复原档位',
+      xhighOptionLabel: 'XHigh 推理覆盖',
+      xhighOptionTitle: '在当前会话将推理等级覆盖为 XHigh（Neon / Hydrogen），不改变原生档位',
+      xhighOnTitle: '当前会话已开启 XHigh 覆盖 — 点击关闭',
+      xhighToggleFailed: '未能切换 XHigh 推理覆盖，请重试。',
+      diagWarningBadge: '告警',
+      diagWarnUrlMismatch: '未能匹配 /v1beta 请求路径（请检查供应商 baseURL）',
+      diagWarnRecordOverflow: '最近响应超过 2 MiB 原生录制上限，本轮已跳过录制',
+      diagWarnRecordInvalid: '最近响应 SSE 帧异常，已跳过原生录制',
+      diagWarnSearchSkipped: '存在不兼容的 toolConfig，Google 原生搜索未注入',
+      diagPromptLabel: '提示词汉化',
+      diagPromptMatchedTpl: '已替换 {matched} / {total} 段',
+      diagPromptMissedTpl: '未匹配内置段: {names}',
+      diagPromptLogZh: '日志提示词为中文',
+      diagPromptLogEn: '日志提示词为英文',
+      diagPromptPending: '等待请求确认',
+      diagHistoryLabel: '原生历史',
+      diagHistoryReplayHitTpl: '命中 {replayed}/{total} 轮',
+      diagHistoryPartialFallback: '部分回退',
+      diagHistoryCumulativeTpl: '累计 {size}',
+      diagHistoryLastTurnTpl: '最近一轮 {size}',
+      diagHistoryDurableTpl: '连续 {consecutive} / {total} 步 · {size}',
+      diagHistoryNoneInSession: '本会话尚无原生记录',
+      diagHistoryEmpty: '尚未记录原生轮次',
+      diagLogUploadLabel: '官方日志',
+      diagLogExcluded: '已自动排除上传',
+      diagLogAutoExclude: '含原生数据时自动排除',
+      diagSearchLabel: 'Google 搜索',
+      diagSearchMixedTpl: '混用 {count} 个本地工具',
+      diagSearchOnly: '纯原生搜索',
+      diagSearchSessionCountTpl: '本会话 {cards} 次',
+      diagSearchDurableSummaryTpl: '本会话 {cards} 次 · {queries} 词 · {sources} 来源',
+      diagSearchSkippedValue: '已跳过注入（toolConfig 冲突）',
+      diagSearchReady: '已就绪（等待调用）',
+      diagThinkingLabel: 'Thinking',
+      diagThinkingXHighApplied: 'XHIGH（会话覆盖）',
+      diagThinkingXHighPending: '已开启 XHigh 覆盖（待发送）',
+      diagThinkingNative: '跟随原生档位',
+      diagThinkingNativeWithLevelTpl: '{level}（跟随原生档位）',
+      diagEmptyHint: '发出首条消息后显示实时覆盖详情',
     }
+
+    const pluginStyles = `
+.dsh-ge-dock-anchor {
+  display: inline-flex;
+  min-width: 0;
+  font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+}
+.dsh-ge-dock-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: inherit;
+  white-space: nowrap;
+  outline: none;
+}
+.dsh-ge-dock-pill svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+button.dsh-ge-dock-pill {
+  cursor: pointer;
+}
+button.dsh-ge-dock-pill[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+@media (hover: hover) {
+  button.dsh-ge-dock-pill:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-secondary);
+  }
+}
+button.dsh-ge-dock-pill:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+}
+.dsh-ge-dock-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-ge-dock-sep {
+  opacity: 0.55;
+  margin: 0 5px;
+}
+.dsh-ge-dock-warn-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-warn-primary);
+  flex: none;
+}
+
+.dsh-ge-diag-panel {
+  position: fixed;
+  z-index: 1100;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: min(300px, calc(100vw - 24px));
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 16px;
+  border: 0;
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--dsw-specific-menu);
+  backdrop-filter: var(--dsw-menu-backdrop-filter);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: default;
+  max-height: calc(100dvh - 12px - max(12px, var(--dsh-frame-overlay-top, 12px)));
+  overflow-x: hidden;
+  overflow-y: auto;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 8px));
+  left: max(12px, anchor(left));
+  right: 12px;
+  position-try-fallbacks: --dsh-ge-diag-window, --dsh-ge-diag-opposite, --dsh-ge-diag-wide-opposite, --dsh-ge-diag-tall, --dsh-ge-diag-viewport;
+  align-self: end;
+  justify-self: start;
+  height: fit-content;
+  min-height: 0;
+  margin: 0;
+}
+@position-try --dsh-ge-diag-window {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 8px));
+  left: 12px;
+  right: 12px;
+  margin: 0;
+  align-self: safe end;
+  justify-self: safe end;
+}
+@position-try --dsh-ge-diag-opposite {
+  top: max(12px, calc(anchor(bottom) + 8px));
+  bottom: 12px;
+  align-self: start;
+}
+@position-try --dsh-ge-diag-wide-opposite {
+  top: max(12px, calc(anchor(bottom) + 8px));
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  align-self: start;
+  justify-self: safe end;
+}
+@position-try --dsh-ge-diag-tall {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: 12px;
+  left: max(12px, anchor(left));
+  right: 12px;
+  margin: 0;
+  align-self: safe start;
+  justify-self: start;
+}
+@position-try --dsh-ge-diag-viewport {
+  position-area: none;
+  inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px;
+  margin: 0;
+  align-self: safe start;
+  justify-self: safe end;
+}
+.dsh-ge-diag-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+}
+.dsh-ge-diag-title-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: none;
+}
+.dsh-ge-diag-title-label svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.dsh-ge-diag-route {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.dsh-ge-diag-rule {
+  margin-bottom: 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+.dsh-ge-diag-warns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.dsh-ge-diag-warn {
+  padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-state-warn-label);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+.dsh-ge-diag-details {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-ge-diag-details dt,
+.dsh-ge-diag-details dd {
+  min-width: 0;
+  margin: 0;
+}
+.dsh-ge-diag-details dd {
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.dsh-ge-diag-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+.dsh-ge-diag-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-ge-xhigh-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.dsh-ge-xhigh {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  min-width: 34px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-state-business-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.dsh-ge-xhigh-error {
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+@media (hover: hover) {
+  .dsh-ge-xhigh:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--dsw-alias-state-business-tertiary), var(--dsw-alias-state-business-primary) 6%);
+  }
+}
+.dsh-ge-xhigh:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+}
+.dsh-ge-xhigh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.dsh-ge-xhigh-glyph {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: currentColor;
+}
+.dsh-ge-xhigh-hover-glyph,
+.dsh-ge-xhigh:focus-visible .dsh-ge-xhigh-rest-glyph {
+  display: none;
+}
+@media (hover: hover) {
+  .dsh-ge-xhigh:hover:not(:disabled) .dsh-ge-xhigh-rest-glyph {
+    display: none;
+  }
+}
+.dsh-ge-xhigh:focus-visible .dsh-ge-xhigh-hover-glyph {
+  display: block;
+}
+@media (hover: hover) {
+  .dsh-ge-xhigh:hover:not(:disabled) .dsh-ge-xhigh-hover-glyph {
+    display: block;
+  }
+}
+
+.dsh-ge-model-opt-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-md, 8px);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+.dsh-ge-model-opt-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.dsh-ge-model-opt-switch {
+  box-sizing: border-box;
+  position: static;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-border-l3);
+  cursor: pointer;
+  outline: none;
+}
+.dsh-ge-model-opt-switch::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--dsw-radius-md, 8px);
+}
+.dsh-ge-model-opt-switch[aria-checked="true"] {
+  background: var(--dsw-alias-brand-primary);
+}
+.dsh-ge-model-opt-switch:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.dsh-ge-model-opt-switch:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+.dsh-ge-model-opt-thumb {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  corner-shape: round;
+  background: var(--dsw-alias-label-primary-foreground);
+  transition: transform 120ms ease;
+}
+.dsh-ge-model-opt-switch[aria-checked="false"] .dsh-ge-model-opt-thumb {
+  background: var(--dsw-alias-switch-thumb);
+}
+.dsh-ge-model-opt-switch[aria-checked="true"] .dsh-ge-model-opt-thumb {
+  transform: translateX(16px);
+}
+.dsh-ge-model-opt-row:has(.dsh-ge-model-opt-switch:focus-visible) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+@media (hover: hover) {
+  .dsh-ge-model-opt-row:has(.dsh-ge-model-opt-switch:not(:disabled)):hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.dsh-ge-search-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  margin: 4px 0;
+}
+.dsh-ge-search-row {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: calc(24px + var(--dsh-content-font-delta, 0px));
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--dsw-radius-xs, 4px);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  text-align: left;
+  outline: none;
+  transition: color 100ms ease;
+}
+.dsh-ge-search-row[data-expandable="true"] {
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dsh-ge-search-row:hover {
+    color: var(--dsw-alias-label-secondary);
+  }
+}
+.dsh-ge-search-row:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+}
+.dsh-ge-search-leading {
+  position: relative;
+  flex: none;
+  width: calc(16px + var(--dsh-content-font-delta, 0px));
+  height: calc(16px + var(--dsh-content-font-delta, 0px));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  color: inherit;
+}
+.dsh-ge-search-leading svg {
+  width: calc(14px + var(--dsh-content-font-delta, 0px));
+  height: calc(14px + var(--dsh-content-font-delta, 0px));
+}
+.dsh-ge-search-icon-idle {
+  display: inline-flex;
+  opacity: 1;
+  transition: opacity 100ms ease;
+}
+.dsh-ge-search-chevron-hover {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+@media (hover: hover) {
+  .dsh-ge-search-row[data-expandable="true"]:hover .dsh-ge-search-icon-idle {
+    opacity: 0;
+  }
+  .dsh-ge-search-row[data-expandable="true"]:hover .dsh-ge-search-chevron-hover {
+    opacity: 1;
+  }
+}
+.dsh-ge-search-row[data-expandable="true"]:focus-visible .dsh-ge-search-icon-idle {
+  opacity: 0;
+}
+.dsh-ge-search-row[data-expandable="true"]:focus-visible .dsh-ge-search-chevron-hover {
+  opacity: 1;
+}
+.dsh-ge-search-title {
+  flex: none;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  font-weight: 400;
+  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
+  color: inherit;
+}
+.dsh-ge-search-dot {
+  flex: none;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.65;
+  margin: 0 6px;
+}
+.dsh-ge-search-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  font-weight: 400;
+  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
+  color: inherit;
+}
+.dsh-ge-search-body {
+  margin: 4px 0 4px 4px;
+  padding: 12px 14px;
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+.dsh-ge-search-section + .dsh-ge-search-section {
+  margin-top: 10px;
+}
+.dsh-ge-search-section-label {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-ge-search-queries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dsh-ge-search-query-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--dsw-radius-xs, 4px);
+  background: var(--dsw-alias-markdown-tag);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dsh-ge-search-sources {
+  margin: 0;
+  padding-left: 2.2em;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.dsh-ge-search-source-item {
+  min-width: 0;
+}
+.dsh-ge-search-source-link {
+  color: var(--dsw-alias-link);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  word-break: break-word;
+  text-decoration: none;
+}
+.dsh-ge-search-source-link:hover,
+.dsh-ge-search-source-link:focus-visible {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.dsh-ge-search-link-icon {
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.25em;
+  margin-right: 5px;
+}
+.dsh-ge-search-source-host {
+  margin-inline-start: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-ge-search-row,
+  .dsh-ge-search-icon-idle,
+  .dsh-ge-search-chevron-hover,
+  .dsh-ge-xhigh,
+  .dsh-ge-model-opt-thumb {
+    transition: none;
+  }
+}
+`
 
     const secondary = { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: 1.5 }
     const caption = { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, lineHeight: '18px' }
@@ -147,27 +774,27 @@ window.__ModuleLoader__.load({
       lineHeight: '16px',
       color: 'var(--dsw-alias-label-secondary)',
     }
-    const xhighButtonBase = {
-      boxSizing: 'border-box',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 4,
-      height: 28,
-      padding: '0 8px',
-      borderRadius: 'var(--dsw-radius-sm, 8px)',
-      font: 'inherit',
-      fontSize: 12,
-      lineHeight: '18px',
-      whiteSpace: 'nowrap',
-      flexShrink: 0,
-      userSelect: 'none',
-      transition: 'background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease',
+
+    function fmt(template, vars) {
+      return String(template).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => String(vars?.[key] ?? ''))
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes < 0) return '0B'
+      if (bytes < 1024) return `${Math.round(bytes)}B`
+      const kb = bytes / 1024
+      if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)}KB`
+      const mb = kb / 1024
+      if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)}MB`
+      const gb = mb / 1024
+      return `${gb < 10 ? gb.toFixed(1) : Math.round(gb)}GB`
     }
 
     function supportsXHighModel(model) {
       return typeof model === 'string' && /^(?:models\/)?gemini-4-(?:neon|hydrogen)(?:$|[-.@])/iu.test(model)
     }
+
+    const emptyRouteEntry = { localizePrompt: false, nativeHistory: false, googleSearch: false }
 
     function routeEntryOf(routes, providerId) {
       const entry = typeof providerId === 'string' && providerId.length > 0 && routes && Object.hasOwn(routes, providerId)
@@ -196,10 +823,11 @@ window.__ModuleLoader__.load({
     }
 
     // Same outline as the bundle icon, cropped for inline marks.
-    function GeminiMark({ label, size = 14 }) {
+    function GeminiMark({ label, size = 14, strokeWidth = 1.6, className }) {
       return h('svg', {
         width: size, height: size, viewBox: '6 6 24 24', fill: 'none',
-        stroke: 'currentColor', strokeWidth: 2.5, strokeLinejoin: 'round',
+        stroke: 'currentColor', strokeWidth, strokeLinejoin: 'round',
+        className,
         role: label ? 'img' : undefined,
         'aria-label': label,
         'aria-hidden': label ? undefined : 'true',
@@ -208,6 +836,52 @@ window.__ModuleLoader__.load({
       }, label ? h('title', null, label) : null, h('path', {
         d: 'M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z',
       }))
+    }
+
+    function CloseCircleFillIcon({ className }) {
+      return h('svg', {
+        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        className, 'aria-hidden': 'true', focusable: 'false',
+      }, h('path', {
+        fillRule: 'evenodd',
+        clipRule: 'evenodd',
+        d: 'M15 8A7 7 0 1 1 1 8A7 7 0 1 1 15 8ZM6.409 10.652L5.348 9.591L6.939 8L5.348 6.409L6.409 5.348L8 6.939L9.591 5.348L10.652 6.409L9.061 8L10.652 9.591L9.591 10.652L8 9.061Z',
+        fill: 'currentColor',
+      }))
+    }
+
+    function GlobeIcon() {
+      return h('svg', {
+        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        strokeWidth: 1, 'aria-hidden': 'true', focusable: 'false',
+      },
+      h('path', { d: 'M7.99986 14.0887C11.3626 14.0887 14.0886 11.3627 14.0886 7.99998C14.0886 4.63727 11.3626 1.91125 7.99986 1.91125C4.63715 1.91125 1.91113 4.63727 1.91113 7.99998C1.91113 11.3627 4.63715 14.0887 7.99986 14.0887Z', stroke: 'currentColor' }),
+      h('path', { d: 'M2.34619 8H13.6538', stroke: 'currentColor', strokeLinecap: 'square' }),
+      h('path', { d: 'M7.99976 14.0889C9.23509 14.0889 10.1743 11.3629 10.1743 8.00006C10.1743 4.63739 9.23509 1.91138 7.99976 1.91138', stroke: 'currentColor' }),
+      h('path', { d: 'M7.99973 14.0889C6.76445 14.0889 5.8252 11.3629 5.8252 8.00006C5.8252 4.63739 6.76445 1.91138 7.99973 1.91138', stroke: 'currentColor' }))
+    }
+
+    function ChevronDownIcon({ className }) {
+      return h('svg', {
+        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        strokeWidth: 1, className, 'aria-hidden': 'true', focusable: 'false',
+      }, h('path', { d: 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6', stroke: 'currentColor' }))
+    }
+
+    function ChevronUpIcon({ className }) {
+      return h('svg', {
+        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        strokeWidth: 1, className, 'aria-hidden': 'true', focusable: 'false',
+      }, h('path', { d: 'M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10', stroke: 'currentColor' }))
+    }
+
+    function ExternalLinkIcon() {
+      return h('svg', {
+        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        strokeWidth: 1.2, className: 'dsh-ge-search-link-icon', 'aria-hidden': 'true', focusable: 'false',
+      },
+      h('path', { d: 'M6.59961 9.40051C6.82779 9.6334 7.10015 9.81842 7.40074 9.94472C7.70132 10.071 8.02409 10.1361 8.35013 10.1361C8.67618 10.1361 8.99894 10.071 9.29953 9.94472C9.60011 9.81842 9.87247 9.6334 10.1007 9.40051L12.9015 6.59967C13.3658 6.13541 13.6266 5.50572 13.6266 4.84915C13.6266 4.19258 13.3658 3.56289 12.9015 3.09863C12.4372 2.63436 11.8075 2.37354 11.151 2.37354C10.4944 2.37354 9.86472 2.63436 9.40045 3.09863L9.05034 3.44873', stroke: 'currentColor' }),
+      h('path', { d: 'M9.40051 6.59959C9.17233 6.3667 8.89997 6.18169 8.59939 6.05538C8.2988 5.92907 7.97603 5.86401 7.64999 5.86401C7.32395 5.86401 7.00118 5.92907 6.70059 6.05538C6.40001 6.18169 6.12765 6.3667 5.89946 6.59959L3.09863 9.40043C2.63436 9.8647 2.37354 10.4944 2.37354 11.151C2.37354 11.8075 2.63436 12.4372 3.09863 12.9015C3.56289 13.3657 4.19258 13.6266 4.84915 13.6266C5.50572 13.6266 6.13541 13.3657 6.59967 12.9015L6.94978 12.5514', stroke: 'currentColor' }))
     }
 
     function useFormMutator(form) {
@@ -421,34 +1095,248 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function LocalizationConfirmation({ sessionId, provider, labels, t }) {
-      const [localized, setLocalized] = React.useState(false)
-      React.useEffect(() => {
-        let stream
+    const emptyStatusTelemetry = { localizedProvider: null, prompt: null, transport: null }
+
+    function statusTelemetryHooks(ctx) {
+      const sessions = new Map()
+      function publish(entry, value) {
+        entry.value = value
+        for (const changed of entry.listeners) changed()
+      }
+      function connect(sessionId, entry) {
         try {
           const url = new URL('./api/dsh-gemini-enhancement/status', document.baseURI)
           if (url.origin !== window.location.origin) return
           url.searchParams.set('sessionId', sessionId)
-          stream = new EventSource(url.href)
-        } catch {
-          return // The match notice stays available without a live connection.
-        }
-        stream.onmessage = ({ data }) => {
-          try { setLocalized(JSON.parse(data) === provider) }
-          catch { setLocalized(false) }
-        }
-        stream.onerror = () => setLocalized(false)
-        return () => {
-          stream.onmessage = stream.onerror = null
-          stream.close()
-        }
-      }, [sessionId, provider])
+          url.searchParams.set('detail', '1')
+          const source = new EventSource(url.href)
+          entry.source = source
+          source.onmessage = ({ data }) => {
+            try {
+              const parsed = JSON.parse(data)
+              if (typeof parsed === 'string' || parsed === null) {
+                publish(entry, { localizedProvider: parsed, prompt: null, transport: null })
+              } else if (parsed && typeof parsed === 'object') {
+                publish(entry, {
+                  localizedProvider: typeof parsed.localizedProvider === 'string' ? parsed.localizedProvider : null,
+                  prompt: parsed.prompt && typeof parsed.prompt === 'object' ? parsed.prompt : null,
+                  transport: parsed.transport && typeof parsed.transport === 'object' ? parsed.transport : null,
+                })
+              }
+            } catch {
+              publish(entry, emptyStatusTelemetry)
+            }
+          }
+          source.onerror = () => {
+            if (entry.value !== emptyStatusTelemetry) publish(entry, emptyStatusTelemetry)
+          }
+        } catch { /* Match notice stays available without a live connection. */ }
+      }
+      function close(entry) {
+        if (!entry.source) return
+        entry.source.onmessage = entry.source.onerror = null
+        entry.source.close()
+        entry.source = null
+      }
+      ctx.effect(() => () => {
+        for (const entry of sessions.values()) close(entry)
+        sessions.clear()
+      })
+      return function useStatusTelemetry(sessionId) {
+        const get = React.useCallback(() => (
+          sessionId ? (sessions.get(sessionId)?.value ?? emptyStatusTelemetry) : emptyStatusTelemetry
+        ), [sessionId])
+        const subscribe = React.useCallback(listener => {
+          if (!sessionId) return () => {}
+          let entry = sessions.get(sessionId)
+          if (!entry) {
+            entry = { listeners: new Set(), value: emptyStatusTelemetry, source: null }
+            sessions.set(sessionId, entry)
+            connect(sessionId, entry)
+          }
+          entry.listeners.add(listener)
+          return () => {
+            entry.listeners.delete(listener)
+            if (entry.listeners.size === 0) {
+              close(entry)
+              if (sessions.get(sessionId) === entry) sessions.delete(sessionId)
+            }
+          }
+        }, [sessionId])
+        return React.useSyncExternalStore(subscribe, get)
+      }
+    }
 
-      const summary = [t(localized ? 'statusLocalized' : 'statusMatched'), ...labels].join(' · ')
-      return h('span', {
-        role: 'status',
-        style: { ...secondary, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, textAlign: 'center' },
-      }, h(GeminiMark, { label: t('source') }), h('span', null, summary))
+    let fallbackAnchorSeq = 0
+
+    function useDiagDialog(resetKey) {
+      const [open, setOpen] = React.useState(false)
+      const [fallbackPos, setFallbackPos] = React.useState(null)
+      const rootRef = React.useRef(null)
+      const panelRef = React.useRef(null)
+      const anchorSeqRef = React.useRef(null)
+      const reactId = typeof React.useId === 'function' ? React.useId().replaceAll(':', '') : null
+      if (!reactId && !anchorSeqRef.current) anchorSeqRef.current = `ge${++fallbackAnchorSeq}`
+      const anchorName = `--dsh-ge-diag-${reactId ?? anchorSeqRef.current}`
+      const supportsAnchor = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('anchor-name', '--a')
+
+      React.useEffect(() => {
+        setOpen(false)
+      }, [resetKey])
+
+      React.useEffect(() => {
+        if (!open || typeof document === 'undefined') return
+        const isInside = target => {
+          if (!target) return false
+          if (typeof Node !== 'undefined' && !(target instanceof Node)) return false
+          return rootRef.current?.contains?.(target) === true || panelRef.current?.contains?.(target) === true
+        }
+        const onKeyDown = e => {
+          if (e?.key === 'Escape') setOpen(false)
+        }
+        const onPointerDown = e => {
+          if (!isInside(e?.target)) setOpen(false)
+        }
+        const onClickCapture = e => {
+          if (!isInside(e?.target)) setOpen(false)
+        }
+        document.addEventListener?.('keydown', onKeyDown)
+        document.addEventListener?.('pointerdown', onPointerDown)
+        document.addEventListener?.('click', onClickCapture, true)
+        return () => {
+          document.removeEventListener?.('keydown', onKeyDown)
+          document.removeEventListener?.('pointerdown', onPointerDown)
+          document.removeEventListener?.('click', onClickCapture, true)
+        }
+      }, [open])
+
+      const useLayout = React.useLayoutEffect || React.useEffect
+      useLayout(() => {
+        if (!open || supportsAnchor || typeof window === 'undefined') {
+          if (!open) setFallbackPos(null)
+          return
+        }
+        const update = () => {
+          const rect = rootRef.current?.getBoundingClientRect?.()
+          if (!rect) return
+          const vw = Number.isFinite(window.innerWidth) ? window.innerWidth : 1024
+          const vh = Number.isFinite(window.innerHeight) ? window.innerHeight : 768
+          const left = Math.max(12, Math.min(rect.left, vw - 312))
+          const bottom = Math.max(12, vh - rect.top + 8)
+          setFallbackPos({ left, bottom })
+        }
+        update()
+        window.addEventListener?.('resize', update)
+        return () => window.removeEventListener?.('resize', update)
+      }, [open, supportsAnchor])
+
+      return { open, setOpen, rootRef, panelRef, anchorName, supportsAnchor, fallbackPos }
+    }
+
+    function collectWarnings(transport, t) {
+      if (!transport) return []
+      const warnings = []
+      if (transport.status === 'url-mismatch') warnings.push(t('diagWarnUrlMismatch'))
+      if (transport.recordStatus === 'overflow') warnings.push(t('diagWarnRecordOverflow'))
+      if (transport.recordStatus === 'invalid') warnings.push(t('diagWarnRecordInvalid'))
+      if (transport.searchMode === 'skipped') warnings.push(t('diagWarnSearchSkipped'))
+      return warnings
+    }
+
+    function buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, model, xhighEnabled, t }) {
+      const rows = []
+
+      if (routeCfg.localizePrompt) {
+        let value
+        let sub = null
+        if (activePrompt) {
+          value = fmt(t('diagPromptMatchedTpl'), { matched: activePrompt.matched ?? 0, total: activePrompt.total ?? 0 })
+          if (Array.isArray(activePrompt.missedBuiltins) && activePrompt.missedBuiltins.length > 0) {
+            sub = fmt(t('diagPromptMissedTpl'), { names: activePrompt.missedBuiltins.join(', ') })
+          }
+        } else if (diag?.promptLocalizedInLog === true) {
+          value = t('diagPromptLogZh')
+        } else if (diag?.promptLocalizedInLog === false) {
+          value = t('diagPromptLogEn')
+        } else {
+          value = t('diagPromptPending')
+        }
+        rows.push({ key: 'prompt', label: t('diagPromptLabel'), value, sub })
+      }
+
+      if (routeCfg.nativeHistory || diag?.hasNativePayload) {
+        let value
+        if (activeTransport && Number.isFinite(activeTransport.totalHistoryTurns) && activeTransport.totalHistoryTurns > 0) {
+          const total = activeTransport.totalHistoryTurns
+          const replayed = activeTransport.replayedHistoryTurns ?? 0
+          const parts = [fmt(t('diagHistoryReplayHitTpl'), { replayed, total })]
+          if (replayed < total) parts[0] += ` (${t('diagHistoryPartialFallback')})`
+          if ((diag?.nativeBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryCumulativeTpl'), { size: formatBytes(diag.nativeBytes) }))
+          else if ((activeTransport.recordedBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) }))
+          value = parts.join(' · ')
+        } else if ((diag?.assistantSteps ?? 0) > 0) {
+          if (diag.nativeSteps === 0) {
+            value = (activeTransport?.recordedBytes ?? 0) > 0
+              ? fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) })
+              : t('diagHistoryNoneInSession')
+          } else {
+            value = fmt(t('diagHistoryDurableTpl'), {
+              consecutive: diag.consecutiveNative ?? 0,
+              total: diag.assistantSteps,
+              size: formatBytes(diag.nativeBytes ?? 0),
+            })
+          }
+        } else if ((activeTransport?.recordedBytes ?? 0) > 0) {
+          value = fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) })
+        } else {
+          value = t('diagHistoryEmpty')
+        }
+        rows.push({ key: 'history', label: t('diagHistoryLabel'), value })
+        rows.push({
+          key: 'logUpload',
+          label: t('diagLogUploadLabel'),
+          value: diag?.hasNativePayload ? t('diagLogExcluded') : t('diagLogAutoExclude'),
+        })
+      }
+
+      if (routeCfg.googleSearch || (diag?.searchCards ?? 0) > 0) {
+        let value
+        if (activeTransport?.searchInjected) {
+          const modeText = activeTransport.searchMode === 'mixed'
+            ? fmt(t('diagSearchMixedTpl'), { count: activeTransport.localToolCount ?? 0 })
+            : t('diagSearchOnly')
+          value = (diag?.searchCards ?? 0) > 0
+            ? `${modeText} · ${fmt(t('diagSearchSessionCountTpl'), { cards: diag.searchCards })}`
+            : modeText
+        } else if ((diag?.searchCards ?? 0) > 0) {
+          value = fmt(t('diagSearchDurableSummaryTpl'), {
+            cards: diag.searchCards,
+            queries: diag.searchQueries ?? 0,
+            sources: diag.searchSources ?? 0,
+          })
+        } else if (activeTransport?.searchMode === 'skipped') {
+          value = t('diagSearchSkippedValue')
+        } else {
+          value = t('diagSearchReady')
+        }
+        rows.push({ key: 'search', label: t('diagSearchLabel'), value })
+      }
+
+      if (supportsXHighModel(model) || activeTransport?.xhighApplied) {
+        let value
+        if (activeTransport?.xhighApplied) {
+          value = t('diagThinkingXHighApplied')
+        } else if (xhighEnabled) {
+          value = t('diagThinkingXHighPending')
+        } else if (activeTransport?.thinkingLevel) {
+          value = fmt(t('diagThinkingNativeWithLevelTpl'), { level: activeTransport.thinkingLevel })
+        } else {
+          value = t('diagThinkingNative')
+        }
+        rows.push({ key: 'thinking', label: t('diagThinkingLabel'), value })
+      }
+
+      return rows
     }
 
     const noSearchCards = []
@@ -474,12 +1362,6 @@ window.__ModuleLoader__.load({
       return { running, turns }
     }
 
-    const activityCardStyle = {
-      margin: '4px 0', padding: '6px 10px', borderRadius: 8,
-      border: '1px solid var(--dsw-alias-label-tertiary)', color: 'var(--dsw-alias-label-primary)',
-      background: 'var(--dsw-alias-bg-base)', fontSize: 13, lineHeight: 1.5, overflowWrap: 'anywhere',
-    }
-
     function safeSourceURL(raw) {
       try {
         const url = new URL(raw)
@@ -487,7 +1369,14 @@ window.__ModuleLoader__.load({
       } catch { /* Untrusted provider data. */ }
     }
 
+    function isRedirectSearchHost(host) {
+      if (typeof host !== 'string' || !host) return false
+      const lower = host.toLowerCase()
+      return lower === 'vertexaisearch.cloud.google.com' || lower.endsWith('.vertexaisearch.cloud.google.com')
+    }
+
     function GoogleSearchCard({ cards, t }) {
+      const [open, setOpen] = React.useState(false)
       const complete = cards.some(card => card.status === 'completed')
       const unconfirmed = cards.some(card => card.status !== 'completed')
       const status = t(unconfirmed ? (complete ? 'activityPartial' : 'activityIncomplete') : 'activityCompleted')
@@ -497,24 +1386,60 @@ window.__ModuleLoader__.load({
         const href = safeSourceURL(source?.url)
         if (!href || links.has(href) || links.size >= 8) continue
         const host = new URL(href).hostname
-        links.set(href, { href, host, title: source.title || host })
+        const redirectHost = isRedirectSearchHost(host)
+        const rawTitle = typeof source?.title === 'string' ? source.title.trim() : ''
+        const title = rawTitle || (redirectHost ? t('activitySourceFallback') : host)
+        const showHost = !redirectHost && Boolean(rawTitle) && host !== rawTitle
+        links.set(href, { href, host, title, showHost })
       }
       const sources = [...links.values()]
+      const hasBody = queries.length > 0 || sources.length > 0
       const counts = [queries.length && `${t('activityQueries')} ${queries.length}`, sources.length && `${t('activitySourceCount')} ${sources.length}`].filter(Boolean)
-      const subtitle = [status, ...counts].join(' · ')
-      const summary = h(React.Fragment, null,
-        h('span', { style: { fontWeight: 600 } }, t('activityTitle')),
-        h('span', { style: { ...secondary, marginInlineStart: 8 } }, subtitle))
-      if (!queries.length && !sources.length) return h('div', { style: activityCardStyle }, summary)
-      const list = { marginBlock: '2px 6px', paddingInlineStart: 20 }
-      return h('details', { style: activityCardStyle },
-        h('summary', { style: { cursor: 'pointer' } }, summary),
-        queries.length > 0 && h('div', null, h('span', { style: secondary }, t('activityQueries')),
-          h('ul', { style: list }, queries.map(query => h('li', { key: query }, query)))),
-        sources.length > 0 && h('div', null, h('span', { style: secondary }, t('activitySources')),
-          h('ul', { style: list }, sources.map(source => h('li', { key: source.href },
-            h('a', { href: source.href, target: '_blank', rel: 'noopener noreferrer', style: { color: 'inherit' } }, source.title),
-            source.host !== source.title && h('span', { style: { ...secondary, marginInlineStart: 8 } }, source.host))))))
+      const summaryText = [unconfirmed || counts.length === 0 ? status : null, ...counts].filter(Boolean).join(' · ')
+
+      const leading = open && hasBody
+        ? h(ChevronUpIcon)
+        : hasBody
+          ? h(React.Fragment, null,
+            h('span', { className: 'dsh-ge-search-icon-idle' }, h(GlobeIcon)),
+            h(ChevronDownIcon, { className: 'dsh-ge-search-chevron-hover' }))
+          : h(GlobeIcon)
+
+      const rowContent = [
+        h('span', { key: 'leading', className: 'dsh-ge-search-leading' }, leading),
+        h('span', { key: 'title', className: 'dsh-ge-search-title' }, t('activityTitle')),
+        h('span', { key: 'dot', className: 'dsh-ge-search-dot', 'aria-hidden': 'true' }),
+        h('span', { key: 'summary', className: 'dsh-ge-search-summary' }, summaryText),
+      ]
+
+      const header = hasBody
+        ? h('button', {
+          type: 'button',
+          className: 'dsh-ge-search-row',
+          'data-expandable': 'true',
+          'aria-expanded': open,
+          onClick: () => setOpen(prev => !prev),
+        }, ...rowContent)
+        : h('div', { className: 'dsh-ge-search-row' }, ...rowContent)
+
+      return h('div', { className: 'dsh-ge-search-root', 'data-open': open && hasBody ? 'true' : undefined },
+        header,
+        open && hasBody ? h('div', { className: 'dsh-ge-search-body', 'data-web': 'search' },
+          queries.length > 0 && h('div', { className: 'dsh-ge-search-section' },
+            h('div', { className: 'dsh-ge-search-section-label' }, t('activityQueries')),
+            h('div', { className: 'dsh-ge-search-queries' },
+              queries.map(query => h('span', { key: query, className: 'dsh-ge-search-query-tag' }, query)))),
+          sources.length > 0 && h('div', { className: 'dsh-ge-search-section' },
+            h('div', { className: 'dsh-ge-search-section-label' }, t('activitySources')),
+            h('ol', { className: 'dsh-ge-search-sources' },
+              sources.map((source, index) => h('li', { key: source.href, value: index + 1, className: 'dsh-ge-search-source-item' },
+                h('a', {
+                  href: source.href,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                  className: 'dsh-ge-search-source-link',
+                }, h(ExternalLinkIcon), source.title),
+                source.showHost && h('span', { className: 'dsh-ge-search-source-host' }, source.host)))))) : null)
     }
 
     // The live composer and visible history rows share one stream per session.
@@ -674,15 +1599,32 @@ window.__ModuleLoader__.load({
         const subscribe = config.subscribe.bind(config)
         const getSnapshot = config.getSnapshot.bind(config)
         const useSearchActivity = searchActivityHooks(ctx)
+        const useStatusTelemetry = statusTelemetryHooks(ctx)
         const { useXHigh, setXHigh } = xhighHooks(ctx)
         const modelsForm = ctx.configForms.get('llm-pi-ai')
         const subscribeModels = modelsForm.subscribe.bind(modelsForm)
         const getModels = modelsForm.getSnapshot.bind(modelsForm)
 
+        ctx.effect(() => {
+          if (typeof document === 'undefined' || !document?.head || typeof document.createElement !== 'function') return
+          const existing = document.head.querySelector?.(`style[data-plugin="${pluginId}"]`)
+          if (existing?.remove) existing.remove()
+          const styleEl = document.createElement('style')
+          styleEl.setAttribute?.('data-plugin', pluginId)
+          if (styleEl.dataset && !styleEl.getAttribute?.('data-plugin')) styleEl.dataset.plugin = pluginId
+          styleEl.textContent = pluginStyles
+          document.head.appendChild(styleEl)
+          return () => {
+            if (typeof styleEl.remove === 'function') styleEl.remove()
+            else styleEl.parentNode?.removeChild?.(styleEl)
+          }
+        })
+
         function LiveSearchActivity({ sessionId, t }) {
           if (!useSearchActivity(sessionId)) return null
-          return h('span', { role: 'status', style: { ...secondary, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } },
-            t('activityLive'))
+          return h('span', { className: 'dsh-ge-dock-anchor' },
+            h('span', { role: 'status', className: 'dsh-ge-dock-pill' },
+              h('span', { className: 'dsh-ge-dock-label' }, t('activityLive'))))
         }
 
         function TurnSearchCards({ sessionId, turn, t, useProjection }) {
@@ -695,41 +1637,126 @@ window.__ModuleLoader__.load({
 
         function EnhancementNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
           const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
-          const selectedProvider = useProjection('modelSelection', selection => selection?.next?.provider)
+          const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
+          const selected = useProjection('modelSelection', selection => selection?.next)
+          const rawDiag = useProjection('geminiEnhancementDiagnostics')
           const modelState = React.useSyncExternalStore(modelStore.subscribe, modelStore.getSnapshot)
           // The projection has no saved choice in a new chat using the profile
           // default. Use the same directory as the picker for that fallback.
-          const provider = selectedProvider ?? modelState?.current?.provider
-          if (snapshot.status !== 'ready' || snapshot.value?.showStatusNotice !== true || !sessionId || !provider) return null
-          const routeCfg = routeEntryOf(snapshot.value?.routes, provider)
-          if (!hasAnyEnhancement(routeCfg)) return null
-          const extraLabels = [
+          const selectedObj = selected && typeof selected === 'object' ? selected : null
+          const legacyProvider = typeof selected === 'string' ? selected : undefined
+          const provider = selectedObj?.provider ?? legacyProvider ?? modelState?.current?.provider
+          const model = selectedObj?.model ?? modelState?.current?.model
+
+          const ready = snapshot.status === 'ready' && snapshot.value?.showStatusNotice === true && Boolean(sessionId) && Boolean(provider)
+          const routeCfg = ready ? routeEntryOf(snapshot.value?.routes, provider) : emptyRouteEntry
+          const active = ready && hasAnyEnhancement(routeCfg)
+
+          const telemetry = useStatusTelemetry(active ? sessionId : null)
+          const xhighEligible = active && supportsXHighModel(model)
+          const xhighEnabled = useXHigh(xhighEligible ? sessionId : null)
+          const { open, setOpen, rootRef, panelRef, anchorName, supportsAnchor, fallbackPos } = useDiagDialog(`${sessionId ?? ''}:${provider ?? ''}`)
+
+          if (!active) return null
+
+          const diag = rawDiag && typeof rawDiag === 'object' && !Array.isArray(rawDiag) ? rawDiag : null
+          const localized = telemetry.localizedProvider === provider
+          const activePrompt = telemetry.prompt?.provider === provider ? telemetry.prompt : null
+          const activeTransport = telemetry.transport?.provider === provider ? telemetry.transport : null
+
+          const segments = [
+            routeCfg.localizePrompt && t(localized ? 'statusLocalized' : 'statusMatched'),
             routeCfg.nativeHistory && t('statusNativeHistory'),
             routeCfg.googleSearch && t('statusGoogleSearch'),
           ].filter(Boolean)
-          if (routeCfg.localizePrompt) {
-            return h(LocalizationConfirmation, {
-              key: JSON.stringify([sessionId, provider]),
-              sessionId,
-              provider,
-              labels: extraLabels,
-              t,
-            })
+          const summaryText = segments.join(' · ')
+          const labelChildren = []
+          segments.forEach((seg, index) => {
+            if (index > 0) labelChildren.push(h('span', { key: `sep-${index}`, className: 'dsh-ge-dock-sep', 'aria-hidden': 'true' }, '·'))
+            labelChildren.push(seg)
+          })
+
+          const warnings = collectWarnings(activeTransport, t)
+          const hasWarning = warnings.length > 0
+
+          const canPortal = open && typeof ReactDOM?.createPortal === 'function' && typeof document !== 'undefined' && Boolean(document.body)
+          let dialogPortal = null
+          if (canPortal) {
+            const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
+            const providerLabel = profile?.displayName || provider
+            const modelLabel = activeTransport?.model || model
+            const routeLabel = modelLabel ? `${providerLabel} / ${modelLabel}` : providerLabel
+            const rows = buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, model: modelLabel, xhighEnabled, t })
+            const hasLiveTelemetry = Boolean(activePrompt || activeTransport)
+            const hasDurableStats = Boolean(
+              diag && (
+                (diag.assistantSteps ?? 0) > 0
+                || (diag.searchCards ?? 0) > 0
+                || diag.hasNativePayload
+                || (diag.promptLocalizedInLog !== undefined && diag.promptLocalizedInLog !== null)
+              ),
+            )
+            const panelStyle = supportsAnchor
+              ? { positionAnchor: anchorName }
+              : fallbackPos
+                ? { top: 'auto', right: 'auto', left: `${fallbackPos.left}px`, bottom: `${fallbackPos.bottom}px` }
+                : { top: 'auto', right: 'auto', left: '12px', bottom: '56px' }
+
+            dialogPortal = ReactDOM.createPortal(
+              h('div', {
+                ref: panelRef,
+                className: 'dsh-ge-diag-panel',
+                role: 'dialog',
+                'aria-label': t('brand'),
+                style: panelStyle,
+              },
+              h('div', { className: 'dsh-ge-diag-title' },
+                h('span', { className: 'dsh-ge-diag-title-label' },
+                  h(GeminiMark, { size: 14, strokeWidth: 1.6 }),
+                  h('span', null, t('brand'))),
+                h('span', { className: 'dsh-ge-diag-route', title: routeLabel }, routeLabel)),
+              h('div', { className: 'dsh-ge-diag-rule', 'aria-hidden': 'true' }),
+              hasWarning ? h('div', { className: 'dsh-ge-diag-warns', role: 'alert' },
+                warnings.map((message, index) => h('div', { key: index, className: 'dsh-ge-diag-warn' }, message))) : null,
+              rows.length > 0 ? h('dl', { className: 'dsh-ge-diag-details' },
+                rows.map(row => h(React.Fragment, { key: row.key },
+                  h('dt', null, row.label),
+                  h('dd', null,
+                    h('span', null, row.value),
+                    row.sub ? h('div', { className: 'dsh-ge-diag-sub' }, row.sub) : null)))) : null,
+              !hasLiveTelemetry && !hasDurableStats
+                ? h('p', { className: 'dsh-ge-diag-hint' }, t('diagEmptyHint'))
+                : null),
+              document.body,
+            )
           }
+
           return h('span', {
-            role: 'status',
-            style: { ...secondary, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, textAlign: 'center' },
-          }, h(GeminiMark, { label: t('source') }), h('span', null, extraLabels.join(' · ')))
+            ref: rootRef,
+            className: 'dsh-ge-dock-anchor',
+            style: supportsAnchor ? { anchorName } : undefined,
+          },
+          h('button', {
+            type: 'button',
+            className: 'dsh-ge-dock-pill',
+            'aria-haspopup': 'dialog',
+            'aria-expanded': open,
+            'aria-label': hasWarning ? `${summaryText} (${t('diagWarningBadge')})` : summaryText,
+            onClick: () => setOpen(prev => !prev),
+          },
+          h(GeminiMark, { size: 14, strokeWidth: 1.6 }),
+          h('span', { className: 'dsh-ge-dock-label' }, ...labelChildren),
+          hasWarning ? h('span', { className: 'dsh-ge-dock-warn-dot', 'aria-hidden': 'true' }) : null),
+          dialogPortal)
         }
 
-        function XHighToggle({
+        function useXHighEligibility({
           sessionId,
           useProjection,
           useSession = emptyHook,
           useSessions = emptyHook,
           modelStore = emptyModelStore,
           modelSelectionAvailable = true,
-          t,
         }) {
           const isSubagent = useSession(snapshot => snapshot?.subagent != null) === true
           const removed = useSession(snapshot => snapshot?.removed === true) === true
@@ -738,8 +1765,10 @@ window.__ModuleLoader__.load({
           const modelState = React.useSyncExternalStore(modelStore.subscribe, modelStore.getSnapshot)
           const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
 
-          const provider = selected?.provider ?? modelState?.current?.provider
-          const model = selected?.model ?? modelState?.current?.model
+          const selectedObj = selected && typeof selected === 'object' ? selected : null
+          const legacyProvider = typeof selected === 'string' ? selected : undefined
+          const provider = selectedObj?.provider ?? legacyProvider ?? modelState?.current?.provider
+          const model = selectedObj?.model ?? modelState?.current?.model
           const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
           const isGeminiRoute = Boolean(provider) && (
             modelsSnap.status === 'ready'
@@ -753,9 +1782,12 @@ window.__ModuleLoader__.load({
             && isGeminiRoute
             && supportsXHighModel(model)
 
+          return { eligible, removed }
+        }
+
+        function useXHighController({ sessionId, eligible, removed, onFailure }) {
           const enabled = useXHigh(eligible ? sessionId : null)
           const [busy, setBusy] = React.useState(false)
-          const [hovered, setHovered] = React.useState(false)
           const busyRef = React.useRef(false)
           const activeRef = React.useRef(true)
           const reqSeqRef = React.useRef(0)
@@ -771,52 +1803,107 @@ window.__ModuleLoader__.load({
             setBusy(false)
           }, [sessionId])
 
-          const disabled = busy || removed
-          const onToggle = React.useCallback(async () => {
-            if (busyRef.current || removed || !sessionId) return
+          const setEnabled = React.useCallback(async nextValue => {
+            if (busyRef.current || removed || !sessionId) return false
             const reqSeq = ++reqSeqRef.current
             busyRef.current = true
             setBusy(true)
             try {
-              await setXHigh(sessionId, !enabled)
+              const ok = await setXHigh(sessionId, nextValue)
+              if (!ok && activeRef.current && reqSeqRef.current === reqSeq) onFailure?.()
+              return ok
             } finally {
               if (reqSeqRef.current === reqSeq) {
                 busyRef.current = false
                 if (activeRef.current) setBusy(false)
               }
             }
-          }, [sessionId, enabled, removed])
+          }, [sessionId, removed, onFailure])
+
+          return { enabled, busy, setEnabled }
+        }
+
+        function XHighModelOption({
+          sessionId,
+          locked = false,
+          reportFailure,
+          useProjection,
+          useSession = emptyHook,
+          useSessions = emptyHook,
+          modelStore = emptyModelStore,
+          modelSelectionAvailable = true,
+          t,
+        }) {
+          const { eligible, removed } = useXHighEligibility({
+            sessionId, useProjection, useSession, useSessions, modelStore, modelSelectionAvailable,
+          })
+          const onFailure = React.useCallback(() => {
+            reportFailure?.(t('xhighToggleFailed'))
+          }, [reportFailure, t])
+          const { enabled, busy, setEnabled } = useXHighController({ sessionId, eligible, removed, onFailure })
 
           if (!eligible) return null
 
-          const tooltip = t(enabled ? 'xhighOnTitle' : 'xhighOffTitle')
-          return h('button', {
-            type: 'button',
-            'aria-pressed': enabled,
-            'aria-busy': busy || undefined,
-            'aria-label': tooltip,
-            title: tooltip,
-            disabled,
-            onMouseDown: event => event.preventDefault(),
-            onMouseEnter: () => setHovered(true),
-            onMouseLeave: () => setHovered(false),
-            onClick: onToggle,
-            style: {
-              ...xhighButtonBase,
-              border: enabled
-                ? '0.5px solid var(--dsw-alias-state-business-primary)'
-                : '0.5px solid var(--dsw-alias-border-l3)',
-              background: enabled
-                ? (hovered && !disabled
-                  ? 'color-mix(in srgb, var(--dsw-alias-state-business-tertiary), var(--dsw-alias-state-business-primary) 8%)'
-                  : 'var(--dsw-alias-state-business-tertiary)')
-                : (hovered && !disabled ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent'),
-              color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-secondary)',
-              fontWeight: enabled ? 500 : 400,
-              opacity: disabled ? 0.65 : 1,
-              cursor: disabled ? 'default' : 'pointer',
+          const label = t('xhighOptionLabel')
+          const tooltip = t('xhighOptionTitle')
+          const disabled = Boolean(locked) || busy || removed
+          return h('div', { className: 'dsh-ge-model-opt-row', title: tooltip },
+            h('span', { className: 'dsh-ge-model-opt-label' }, label),
+            h('button', {
+              type: 'button',
+              role: 'switch',
+              className: 'dsh-ge-model-opt-switch',
+              'aria-checked': enabled,
+              'aria-label': label,
+              'aria-busy': busy || undefined,
+              title: tooltip,
+              disabled,
+              onClick: () => setEnabled(!enabled),
+            }, h('span', { className: 'dsh-ge-model-opt-thumb', 'aria-hidden': 'true' })))
+        }
+
+        function XHighActiveChip({
+          sessionId,
+          useProjection,
+          useSession = emptyHook,
+          useSessions = emptyHook,
+          modelStore = emptyModelStore,
+          modelSelectionAvailable = true,
+          t,
+        }) {
+          const { eligible, removed } = useXHighEligibility({
+            sessionId, useProjection, useSession, useSessions, modelStore, modelSelectionAvailable,
+          })
+          const [failed, setFailed] = React.useState(false)
+          const onFailure = React.useCallback(() => setFailed(true), [])
+          const { enabled, busy, setEnabled } = useXHighController({ sessionId, eligible, removed, onFailure })
+
+          React.useEffect(() => {
+            setFailed(false)
+          }, [sessionId, enabled])
+
+          if (!eligible || !enabled) return null
+
+          const tooltip = t('xhighOnTitle')
+          return h('span', { className: 'dsh-ge-xhigh-wrap' },
+            h('button', {
+              type: 'button',
+              className: 'dsh-ge-xhigh',
+              'aria-busy': busy || undefined,
+              'aria-label': tooltip,
+              title: tooltip,
+              disabled: busy || removed,
+              onMouseDown: event => event.preventDefault(),
+              onClick: () => {
+                setFailed(false)
+                return setEnabled(false)
+              },
             },
-          }, h(GeminiMark, { size: 12 }), h('span', null, t('xhighLabel')))
+            h('span', { className: 'dsh-ge-xhigh-glyph', 'aria-hidden': 'true' },
+              h(GeminiMark, { size: 14, strokeWidth: 1.6, className: 'dsh-ge-xhigh-rest-glyph' }),
+              h(CloseCircleFillIcon, { className: 'dsh-ge-xhigh-hover-glyph' })),
+            h('span', null, t('xhighLabel'))),
+            failed ? h('span', { className: 'dsh-ge-xhigh-error', role: 'status' }, t('xhighToggleFailed')) : null)
         }
 
         ctx.effect(() => ctx.locale.register(namespace, { en, zh }))
@@ -847,17 +1934,22 @@ window.__ModuleLoader__.load({
             try { return { modelStore: models.directoryFor(sessionId).store } }
             catch { return {} }
           }
+          const injectXHighContext = sessionId => ({
+            ...injectModelStore(sessionId),
+            modelSelectionAvailable: !sessionId || sessions?.subagentAddress?.(sessionId) === undefined,
+          })
           scope.slots.inject('conversation.composer.dock', () => scope.slots.register({
             name: 'conversation.composer.dock', id: `${pluginId}-notice`, order: 2, locale: namespace,
             inject: injectModelStore,
           }, EnhancementNotice))
+          scope.slots.inject('conversation.input.model.options', () => scope.slots.register({
+            name: 'conversation.input.model.options', id: `${pluginId}-xhigh`, order: -10, locale: namespace,
+            inject: injectXHighContext,
+          }, XHighModelOption))
           scope.slots.inject('conversation.input.right', () => scope.slots.register({
             name: 'conversation.input.right', id: `${pluginId}-xhigh`, order: 100, locale: namespace,
-            inject: sessionId => ({
-              ...injectModelStore(sessionId),
-              modelSelectionAvailable: !sessionId || sessions?.subagentAddress?.(sessionId) === undefined,
-            }),
-          }, XHighToggle))
+            inject: injectXHighContext,
+          }, XHighActiveChip))
         })
       },
     }

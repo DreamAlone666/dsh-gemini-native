@@ -5,6 +5,7 @@ import { geminiTransport } from './gemini-transport.js'
 import { googleSearchActivity } from './google-search-activity.js'
 import { hasNativeReplay } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
+import { diagnosticsProjection } from './diagnostics-projection.js'
 import { webSearchScope } from './web-search-scope.js'
 import { xhighState } from './xhigh.js'
 
@@ -63,24 +64,48 @@ const translations = new Map(Object.entries({
 
 function localizeSections(presentation) {
   let changed = false
+  let total = 0
+  let matched = 0
+  const missedBuiltins = []
   const sections = presentation.sections.map(section => {
+    if (typeof section?.text !== 'string' || section.text.length === 0) return section
+    total += 1
     const text = translations.get(section.name)?.get(section.text)
-    if (text === undefined) return section
-    changed = true
-    return { ...section, text }
+    if (text !== undefined) {
+      matched += 1
+      changed = true
+      return { ...section, text }
+    }
+    if (translations.has(section.name) && missedBuiltins.length < 6 && !missedBuiltins.includes(section.name)) {
+      missedBuiltins.push(section.name)
+    }
+    return section
   })
-  return changed ? { ...presentation, sections } : presentation
+  return {
+    localized: changed ? { ...presentation, sections } : presentation,
+    stats: { matched, total, missedBuiltins },
+  }
 }
 
 export function apply(ctx, config) {
   let observerFor
   let notice
   const reportFor = (sessionId, liveOnly = false) => observerFor?.reportFor(sessionId, liveOnly)
+  const recordTransport = (sessionId, snapshot) => notice?.recordTransport?.(sessionId, snapshot)
   const xhigh = ctx.inject ? xhighState(ctx) : undefined
   ctx.inject?.(['sessionProjections'], child => {
     child.effect(async () => {
-      const handle = await child.sessionProjections.register(nativeSearchProjection)
-      return () => handle.dispose()
+      const results = await Promise.allSettled([
+        child.sessionProjections.register(nativeSearchProjection),
+        child.sessionProjections.register(diagnosticsProjection),
+      ])
+      const handles = results.filter(result => result.status === 'fulfilled').map(result => result.value)
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) {
+        await Promise.all(handles.map(handle => handle.dispose()))
+        throw failed.reason
+      }
+      return () => Promise.all(handles.map(handle => handle.dispose()))
     })
   })
   ctx.inject?.(['sessionLogDeepSeek', 'sessions'], child => {
@@ -95,7 +120,9 @@ export function apply(ctx, config) {
       return native
     })
   })
-  ctx.inject?.(['llm', 'loader'], child => geminiTransport(child, config, routeConfigOf, reportFor, sessionId => xhigh.isEnabled(sessionId)))
+  ctx.inject?.(['llm', 'loader'], child => geminiTransport(
+    child, config, routeConfigOf, reportFor, sessionId => xhigh.isEnabled(sessionId), recordTransport,
+  ))
   ctx.inject?.(['tools', 'agents'], child => webSearchScope(ctx, child, config, routeConfigOf))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, routeConfigOf)
@@ -107,8 +134,12 @@ export function apply(ctx, config) {
     const provider = context?.modelSelection?.provider
     const enabled = routeConfigOf(config.routes.get(), provider).localizePrompt
     const presentation = await next()
-    const localized = enabled ? localizeSections(presentation) : presentation
-    notice?.remember(context, provider, localized === presentation ? undefined : localized)
+    if (!enabled) {
+      notice?.remember(context, provider, undefined, null)
+      return presentation
+    }
+    const { localized, stats } = localizeSections(presentation)
+    notice?.remember(context, provider, localized === presentation ? undefined : localized, stats)
     return localized
   })
 }

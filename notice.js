@@ -36,24 +36,107 @@ function effectivePrompt(messages) {
   }
 }
 
+function normalizeStats(stats) {
+  if (!stats || typeof stats !== 'object') return null
+  if (!Number.isSafeInteger(stats.matched) || stats.matched < 0) return null
+  if (!Number.isSafeInteger(stats.total) || stats.total < 0) return null
+  const missedBuiltins = Array.isArray(stats.missedBuiltins)
+    ? stats.missedBuiltins.filter(name => typeof name === 'string' && name.length > 0).slice(0, 6)
+    : []
+  return { matched: stats.matched, total: stats.total, missedBuiltins }
+}
+
+function normalizeTransport(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  return {
+    provider: typeof snapshot.provider === 'string' ? snapshot.provider : '',
+    model: typeof snapshot.model === 'string' ? snapshot.model : '',
+    status: snapshot.status === 'url-mismatch' ? 'url-mismatch' : 'ok',
+    host: typeof snapshot.host === 'string' && snapshot.host.length > 0 ? snapshot.host : null,
+    totalHistoryTurns: Number.isSafeInteger(snapshot.totalHistoryTurns) && snapshot.totalHistoryTurns >= 0
+      ? snapshot.totalHistoryTurns : null,
+    replayedHistoryTurns: Number.isSafeInteger(snapshot.replayedHistoryTurns) && snapshot.replayedHistoryTurns >= 0
+      ? snapshot.replayedHistoryTurns : null,
+    searchConfigured: snapshot.searchConfigured === true,
+    searchInjected: snapshot.searchInjected === true,
+    searchMode: ['mixed', 'search-only', 'skipped', 'off'].includes(snapshot.searchMode) ? snapshot.searchMode : 'off',
+    localToolCount: Number.isSafeInteger(snapshot.localToolCount) && snapshot.localToolCount >= 0
+      ? snapshot.localToolCount : 0,
+    xhighRequested: snapshot.xhighRequested === true,
+    xhighApplied: snapshot.xhighApplied === true,
+    thinkingLevel: typeof snapshot.thinkingLevel === 'string' && snapshot.thinkingLevel.length > 0
+      ? snapshot.thinkingLevel : null,
+    recordedBytes: Number.isSafeInteger(snapshot.recordedBytes) && snapshot.recordedBytes >= 0
+      ? snapshot.recordedBytes : null,
+    recordedFrames: Number.isSafeInteger(snapshot.recordedFrames) && snapshot.recordedFrames >= 0
+      ? snapshot.recordedFrames : null,
+    recordStatus: ['saved', 'overflow', 'invalid', 'none'].includes(snapshot.recordStatus)
+      ? snapshot.recordStatus : null,
+  }
+}
+
 export function localizationNotice(ctx, config, routeConfigOf) {
   const candidates = new WeakMap()
   const recent = new Map()
   const subscribers = new Set()
   const encoder = new TextEncoder()
 
-  function publish(sessionId, provider) {
-    if ((recent.get(sessionId) ?? null) === provider) return
-    recent.delete(sessionId)
-    if (provider !== null) {
-      recent.set(sessionId, provider)
+  function detailSnapshot(entry) {
+    if (!entry) return { localizedProvider: null, prompt: null, transport: null }
+    const localizeActive = entry.localizedProvider !== null
+      && routeConfigOf(config.routes.get(), entry.localizedProvider).localizePrompt
+    return {
+      localizedProvider: localizeActive ? entry.localizedProvider : null,
+      prompt: localizeActive ? entry.prompt : null,
+      transport: entry.transport,
+    }
+  }
+
+  function updateSession(sessionId, patch) {
+    const prev = recent.get(sessionId) ?? { localizedProvider: null, prompt: null, transport: null }
+    const next = {
+      localizedProvider: Object.hasOwn(patch, 'localizedProvider') ? patch.localizedProvider : prev.localizedProvider,
+      prompt: Object.hasOwn(patch, 'prompt') ? patch.prompt : prev.prompt,
+      transport: Object.hasOwn(patch, 'transport') ? patch.transport : prev.transport,
+    }
+    const prevDetail = JSON.stringify(detailSnapshot(prev))
+    const nextDetail = JSON.stringify(detailSnapshot(next))
+    const prevLegacy = prev.localizedProvider
+    const nextLegacy = next.localizedProvider
+
+    const isEmpty = next.localizedProvider === null && next.prompt === null && next.transport === null
+    let evicted
+    if (isEmpty) {
+      recent.delete(sessionId)
+    } else {
+      if (recent.has(sessionId) && prevDetail === nextDetail && prevLegacy === nextLegacy) return
+      recent.delete(sessionId)
+      recent.set(sessionId, next)
       if (recent.size > recentLimit) {
-        const evicted = recent.keys().next().value
+        evicted = recent.keys().next().value
         recent.delete(evicted)
-        for (const sub of subscribers) if (sub.sessionId === evicted) sub.update(null)
       }
     }
-    for (const sub of subscribers) if (sub.sessionId === sessionId) sub.update(provider)
+
+    if (evicted !== undefined) {
+      const emptyDetail = JSON.stringify(detailSnapshot(undefined))
+      const emptyLegacy = JSON.stringify(null)
+      for (const sub of subscribers) {
+        if (sub.sessionId !== evicted) continue
+        sub.update(sub.detail ? emptyDetail : emptyLegacy)
+      }
+    }
+
+    if (prevLegacy !== nextLegacy || prevDetail !== nextDetail) {
+      for (const sub of subscribers) {
+        if (sub.sessionId !== sessionId) continue
+        if (sub.detail) {
+          if (prevDetail !== nextDetail) sub.update(nextDetail)
+        } else if (prevLegacy !== nextLegacy) {
+          sub.update(JSON.stringify(nextLegacy))
+        }
+      }
+    }
   }
 
   ctx.on('llm/stream', (options, next) => {
@@ -63,32 +146,46 @@ export function localizationNotice(ctx, config, routeConfigOf) {
     const confirmed = config.showStatusNotice.get() && candidate.prompt !== undefined
       && routeConfigOf(config.routes.get(), options.provider).localizePrompt
       && effectivePrompt(options.messages) === candidate.prompt
-    publish(candidate.sessionId, confirmed ? candidate.provider : null)
+    updateSession(candidate.sessionId, {
+      localizedProvider: confirmed ? candidate.provider : null,
+      prompt: confirmed && candidate.stats ? { provider: candidate.provider, ...candidate.stats } : null,
+    })
     return stream
   })
 
   function watch(request) {
-    const sessionId = new URL(request.url).searchParams.get('sessionId')
+    const url = new URL(request.url)
+    const sessionId = url.searchParams.get('sessionId')
     if (!sessionId || sessionId.length > 256) return new Response(null, { status: 400 })
     if (!config.showStatusNotice.get() || request.signal.aborted) return new Response(null, { status: 204 })
-    let pending = recent.get(sessionId) ?? null
-    if (pending !== null && !routeConfigOf(config.routes.get(), pending).localizePrompt) pending = null
+    const detail = url.searchParams.get('detail') === '1'
+    let pending
+    if (detail) {
+      pending = JSON.stringify(detailSnapshot(recent.get(sessionId)))
+    } else {
+      let provider = recent.get(sessionId)?.localizedProvider ?? null
+      if (provider !== null && !routeConfigOf(config.routes.get(), provider).localizePrompt) provider = null
+      pending = JSON.stringify(provider)
+    }
     let sent
     let controller
+    let closed = false
     const cleanup = () => {
       subscribers.delete(sub)
       request.signal.removeEventListener('abort', close)
     }
     function close() {
+      if (closed) return
+      closed = true
       cleanup()
-      controller.close()
+      try { controller.close() } catch { /* Stream may already be closed. */ }
     }
     function flush() {
-      if (controller.desiredSize <= 0 || sent === pending) return
+      if (closed || controller.desiredSize <= 0 || sent === pending) return
       sent = pending
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify(sent)}\n\n`))
+      controller.enqueue(encoder.encode(`data: ${sent}\n\n`))
     }
-    const sub = { sessionId, close, update(provider) { pending = provider; flush() } }
+    const sub = { sessionId, detail, close, update(payload) { pending = payload; flush() } }
     return new Response(new ReadableStream({
       start(stream) {
         controller = stream
@@ -97,7 +194,10 @@ export function localizationNotice(ctx, config, routeConfigOf) {
         flush()
       },
       pull: flush,
-      cancel: cleanup,
+      cancel() {
+        closed = true
+        cleanup()
+      },
     }), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' } })
   }
 
@@ -105,17 +205,28 @@ export function localizationNotice(ctx, config, routeConfigOf) {
   // to exact Fetch routes. No prompt text or credentials cross it.
   ctx.connection.fetch.register({ path: statusPath, methods: ['GET'], requestBody: 'buffered', fetch: watch })
   ctx.effect(() => () => {
-    for (const sub of subscribers) sub.close()
+    for (const sub of [...subscribers]) sub.close()
     recent.clear()
   })
 
   return {
-    remember(context, provider, localized) {
+    remember(context, provider, localized, stats = null) {
       const sessionId = context?.agent?.id
       const signal = context?.signal
       if (!sessionId || !signal || typeof provider !== 'string' || provider.length === 0) return
       const prompt = localized && config.showStatusNotice.get() ? expectedPrompt(localized) : undefined
-      candidates.set(signal, { sessionId, provider, prompt })
+      candidates.set(signal, { sessionId, provider, prompt, stats: normalizeStats(stats) })
+    },
+    recordTransport(sessionId, snapshot) {
+      if (!config.showStatusNotice.get()) return
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) return
+      if (snapshot === null) {
+        updateSession(sessionId, { transport: null })
+        return
+      }
+      const transport = normalizeTransport(snapshot)
+      if (!transport) return
+      updateSession(sessionId, { transport })
     },
   }
 }

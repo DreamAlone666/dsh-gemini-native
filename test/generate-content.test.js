@@ -6,7 +6,12 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
-import { hasNativeReplay, nativeReplayOf } from '../generate-content.js'
+import { diagnosticsProjection } from '../diagnostics-projection.js'
+import { geminiTransport } from '../gemini-transport.js'
+import {
+  attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, nativeReplayOf,
+  normalizeEndpoint, patchGenerateContentBody, routeIdentity,
+} from '../generate-content.js'
 import { searchActivityPath } from '../google-search-activity.js'
 import { nativeSearchProjection } from '../native-search-projection.js'
 import { xhighPath } from '../xhigh.js'
@@ -160,6 +165,18 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
     assert.equal(privacy.exclude({ sessionId: agent.id, purpose: 'session-title' }), true)
     const view = ctx.sessionProjections.snapshot(agent.session).values[nativeSearchProjection.key]
     assert.deepEqual(view, { 1: searchSummary })
+    const diag = ctx.sessionProjections.snapshot(agent.session).values[diagnosticsProjection.key]
+    assert.equal(diag.assistantSteps, 2)
+    assert.equal(diag.nativeSteps, 2)
+    assert.equal(diag.consecutiveNative, 2)
+    assert.equal(diag.hasNativePayload, true)
+    assert.ok(diag.nativeBytes > 0)
+    assert.equal(diag.lastNativeModel, model)
+    assert.equal(diag.lastNativeOutcome, 'complete')
+    assert.equal(diag.searchCards, 1)
+    assert.equal(diag.searchQueries, 1)
+    assert.equal(diag.searchSources, 1)
+    assert.equal(diag.promptLocalizedInLog, false)
 
     // Verify failed transport attempt still preserves incomplete search evidence for projection.
     mode = 'drop'
@@ -205,6 +222,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       }])
       const session = fresh.sessions.prepare(agent.id, { meta: record.header, seed: record.events })
       assert.deepEqual(fresh.sessionProjections.snapshot(session).values[nativeSearchProjection.key], { 1: searchSummary })
+      assert.deepEqual(fresh.sessionProjections.snapshot(session).values[diagnosticsProjection.key], diag)
       const dispose = fresh.sessions.enter(session)
       try {
         fresh.sessions.announce(session)
@@ -395,6 +413,10 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
       same.ctx.sessionProjections.snapshot(agent.session).values[nativeSearchProjection.key],
       { 1: searchSummary },
     )
+    const sameDiag = same.ctx.sessionProjections.snapshot(agent.session).values[diagnosticsProjection.key]
+    assert.equal(sameDiag.assistantSteps, 2)
+    assert.equal(sameDiag.nativeSteps, 2)
+    assert.equal(sameDiag.searchCards, 1)
     const eventsAfterCompaction = agent.session.snapshotEvents(seqBeforeCompaction)
     assert.equal(eventsAfterCompaction.some(hasNativeReplay), false)
     assert.equal(JSON.stringify(eventsAfterCompaction).includes('dshGeminiNative'), false)
@@ -440,3 +462,193 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
     assert.equal(crossReq.body.contents[1].parts.some(part => Object.hasOwn(part, 'toolCall')), false)
     assert.notEqual(crossReq.body.generationConfig?.thinkingConfig?.thinkingLevel, 'XHIGH')
   })
+
+test('patchGenerateContentBody counts totalModelTurns and replayedModelTurns accurately', () => {
+  const baseURL = normalizeEndpoint('https://gemini.test/v1beta')
+  const route = { baseURL, provider: 'native', googleSearch: false }
+  route.identity = routeIdentity(route)
+  const prefix0 = historyFingerprint([{ role: 'user', parts: [{ text: 'u1' }] }])
+  const blocks1 = [{ type: 'text', text: 'Native turn 1' }]
+  const parts1 = [{ text: 'Native turn 1', thoughtSignature: validSig('s1') }]
+  const replay1 = makeNativeReplayData(route, model, [[{ index: 0, content: { role: 'model', parts: parts1 }, finishReason: 'STOP' }]], [], 'complete', prefix0, blocks1)
+
+  const body = {
+    contents: [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'Native turn 1' }] },
+      { role: 'user', parts: [{ text: 'u2' }] },
+      { role: 'model', parts: [{ text: 'Plain turn 2' }] },
+    ],
+  }
+  const request = {
+    provider: 'native',
+    model,
+    sessionId: 'count-test',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'u1' }] },
+      { role: 'assistant', content: blocks1, source: { kind: 'model', provider: 'native', model, replayState: { response: replay1 } } },
+      { role: 'user', content: [{ type: 'text', text: 'u2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'Plain turn 2' }], source: { kind: 'model', provider: 'native', model } },
+    ],
+  }
+
+  const patched = patchGenerateContentBody(body, request, route)
+  assert.equal(patched.totalModelTurns, 2)
+  assert.equal(patched.replayedModelTurns, 1)
+  assert.equal(patched.changed, true)
+
+  const userOnly = patchGenerateContentBody({ contents: [{ role: 'user', parts: [{ text: 'hello' }] }] }, { ...request, messages: [] }, route)
+  assert.equal(userOnly.totalModelTurns, 0)
+  assert.equal(userOnly.replayedModelTurns, 0)
+})
+
+test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighApplied, saved/overflow, and ignores compaction', async t => {
+  const handlers = new Map()
+  const originalFetch = globalThis.fetch
+  const recorded = []
+  let routes = { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } }
+  let responseFactory = () => sse([frame([{ text: 'ok' }], 'STOP')])
+  globalThis.fetch = async (input, init) => responseFactory(input, init)
+  t.after(() => { globalThis.fetch = originalFetch })
+
+  const sessionsService = { get: id => id === 'sess-1' ? { requestHeader: () => ({ config: { provider: 'native', model } }) } : undefined }
+  let cleanup
+  geminiTransport({
+    get: name => name === 'sessions' ? sessionsService : undefined,
+    loader: { resolve: () => ({ moduleNamespace: { isAgentLoopRequest: request => request.agent === true } }) },
+    logger: { warn() {} },
+    on: (event, fn) => handlers.set(event, fn),
+    effect: start => { cleanup = start() },
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, undefined, sessionId => sessionId === 'sess-1', (sessionId, snapshot) => {
+    recorded.push({ sessionId, snapshot })
+  })
+  t.after(() => cleanup?.())
+
+  const baseURL = 'https://gemini.test/v1beta'
+  const declaration = { name: 'read_mock', description: 'Read', parameters: { type: 'object', properties: {} } }
+
+  async function runCall({
+    targetModel = model,
+    targetBaseURL = baseURL,
+    loop = true,
+    purpose,
+    body = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], tools: [{ functionDeclarations: [declaration] }] },
+  } = {}) {
+    const request = Object.freeze({ provider: 'native', model: targetModel, sessionId: 'sess-1', agent: loop, purpose, messages: [] })
+    const headers = new Headers({ 'content-length': '1' })
+    const init = { method: 'POST', headers, signal: new AbortController().signal, body: JSON.stringify(body) }
+    const input = `${targetBaseURL}/models/${targetModel}:streamGenerateContent?alt=sse`
+    const stream = handlers.get('llm/stream')(request, async function* () {
+      await Promise.resolve()
+      handlers.get('llm-pi-ai/request-headers')({ ...request, baseURL: targetBaseURL }, headers, () => headers)
+      const res = await globalThis.fetch(input, init)
+      await res.text()
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    for await (const _chunk of stream) {}
+  }
+
+  // 1. url-mismatch when baseURL is non-HTTP(S).
+  await runCall({ targetBaseURL: 'ftp://bad.host.test/v1beta' })
+  assert.equal(recorded.length, 1)
+  assert.deepEqual(recorded[0], {
+    sessionId: 'sess-1',
+    snapshot: {
+      provider: 'native',
+      model,
+      status: 'url-mismatch',
+      host: 'bad.host.test',
+      totalHistoryTurns: null,
+      replayedHistoryTurns: null,
+      searchConfigured: true,
+      searchInjected: false,
+      searchMode: 'skipped',
+      localToolCount: 0,
+      xhighRequested: true,
+      xhighApplied: false,
+      thinkingLevel: null,
+      recordedBytes: null,
+      recordedFrames: null,
+      recordStatus: null,
+    },
+  })
+
+  // 2. nativeHistory + googleSearch (mixed) + xhighApplied -> outbound then saved inbound.
+  recorded.length = 0
+  await runCall()
+  assert.equal(recorded.length, 2)
+  assert.deepEqual(recorded[0].snapshot, {
+    provider: 'native',
+    model,
+    status: 'ok',
+    host: 'gemini.test',
+    totalHistoryTurns: 0,
+    replayedHistoryTurns: 0,
+    searchConfigured: true,
+    searchInjected: true,
+    searchMode: 'mixed',
+    localToolCount: 1,
+    xhighRequested: true,
+    xhighApplied: true,
+    thinkingLevel: 'XHIGH',
+    recordedBytes: null,
+    recordedFrames: null,
+    recordStatus: null,
+  })
+  assert.equal(recorded[1].snapshot.recordStatus, 'saved')
+  assert.equal(recorded[1].snapshot.recordedFrames, 1)
+  assert.ok(recorded[1].snapshot.recordedBytes > 0)
+
+  // 3. nativeHistory overflow (> 2MB).
+  recorded.length = 0
+  const hugeText = 'x'.repeat(600 * 1024)
+  responseFactory = () => sse([
+    frame([{ text: hugeText }]),
+    frame([{ text: hugeText }]),
+    frame([{ text: hugeText }]),
+    frame([{ text: hugeText }], 'STOP'),
+  ])
+  await runCall()
+  assert.equal(recorded.length, 2)
+  assert.equal(recorded[0].snapshot.recordStatus, null)
+  assert.equal(recorded[1].snapshot.recordStatus, 'overflow')
+  assert.equal(recorded[1].snapshot.recordedFrames, 0)
+  assert.ok(recorded[1].snapshot.recordedBytes > 2 * 1024 * 1024)
+
+  // 4. compaction must never overwrite main request telemetry.
+  recorded.length = 0
+  responseFactory = () => sse([frame([{ text: 'summary' }], 'STOP')])
+  await runCall({ loop: false, purpose: 'compaction' })
+  assert.equal(recorded.length, 0)
+
+  // 5. googleSearch skipped (AUTO mode) without nativeHistory still emits telemetry.
+  routes = { native: { localizePrompt: false, nativeHistory: false, googleSearch: true } }
+  recorded.length = 0
+  await runCall({
+    body: {
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      tools: [{ functionDeclarations: [declaration] }],
+      toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+    },
+  })
+  assert.equal(recorded.length, 1)
+  assert.deepEqual(recorded[0].snapshot, {
+    provider: 'native',
+    model,
+    status: 'ok',
+    host: 'gemini.test',
+    totalHistoryTurns: null,
+    replayedHistoryTurns: null,
+    searchConfigured: true,
+    searchInjected: false,
+    searchMode: 'skipped',
+    localToolCount: 1,
+    xhighRequested: true,
+    xhighApplied: true,
+    thinkingLevel: 'XHIGH',
+    recordedBytes: null,
+    recordedFrames: null,
+    recordStatus: null,
+  })
+})
