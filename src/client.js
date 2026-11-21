@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
       xhighToggleFailed: 'Could not update XHigh effort override. Please try again.',
       diagWarningBadge: 'Warning',
       diagWarnUrlMismatch: 'Could not match /v1beta request path (check provider baseURL).',
-      diagWarnRecordOverflow: 'Last response exceeded the 2 MiB native recording limit; skipped recording for this turn.',
+      diagWarnRecordOverflow: 'Last response exceeded the 2 MiB native recording limit and was not recorded.',
       diagWarnRecordInvalid: 'Last response SSE frames were invalid; skipped native recording.',
       diagWarnSearchSkipped: 'Incompatible toolConfig present; native Google Search was not injected.',
       diagPromptLabel: 'Prompt localization',
@@ -65,13 +65,13 @@ window.__ModuleLoader__.load({
       diagPromptLogEn: 'Log prompt is English',
       diagPromptPending: 'Awaiting request',
       diagHistoryLabel: 'Native history',
-      diagHistoryReplayHitTpl: 'Matched {replayed}/{total} turns',
+      diagHistoryReplayHitTpl: 'Replay matched {replayed} / {total} steps',
       diagHistoryPartialFallback: 'partial fallback',
       diagHistoryCumulativeTpl: 'total {size}',
-      diagHistoryLastTurnTpl: 'last turn {size}',
+      diagHistoryLastRecordingTpl: 'last recording {size}',
       diagHistoryDurableTpl: '{consecutive} / {total} steps · {size}',
       diagHistoryNoneInSession: 'No native records in session',
-      diagHistoryEmpty: 'No native turns recorded yet',
+      diagHistoryEmpty: 'No native data recorded yet',
       diagLogUploadLabel: 'Official log',
       diagLogExcluded: 'Auto-excluded from upload',
       diagLogAutoExclude: 'Auto-excluded if native data present',
@@ -82,11 +82,6 @@ window.__ModuleLoader__.load({
       diagSearchDurableSummaryTpl: '{cards} runs · {queries} queries · {sources} sources',
       diagSearchSkippedValue: 'Skipped (toolConfig conflict)',
       diagSearchReady: 'Ready (awaiting call)',
-      diagThinkingLabel: 'Thinking',
-      diagThinkingXHighApplied: 'XHIGH (session override)',
-      diagThinkingXHighPending: 'XHigh override on (pending)',
-      diagThinkingNative: 'Follows native effort',
-      diagThinkingNativeWithLevelTpl: '{level} (native effort)',
       diagEmptyHint: 'Send a message to view live override details.',
     }
 
@@ -137,7 +132,7 @@ window.__ModuleLoader__.load({
       xhighToggleFailed: '未能切换 XHigh 推理覆盖，请重试。',
       diagWarningBadge: '告警',
       diagWarnUrlMismatch: '未能匹配 /v1beta 请求路径（请检查供应商 baseURL）',
-      diagWarnRecordOverflow: '最近响应超过 2 MiB 原生录制上限，本轮已跳过录制',
+      diagWarnRecordOverflow: '最近响应超过 2 MiB 原生录制上限，未录制该响应',
       diagWarnRecordInvalid: '最近响应 SSE 帧异常，已跳过原生录制',
       diagWarnSearchSkipped: '存在不兼容的 toolConfig，Google 原生搜索未注入',
       diagPromptLabel: '提示词汉化',
@@ -147,13 +142,13 @@ window.__ModuleLoader__.load({
       diagPromptLogEn: '日志提示词为英文',
       diagPromptPending: '等待请求确认',
       diagHistoryLabel: '原生历史',
-      diagHistoryReplayHitTpl: '命中 {replayed}/{total} 轮',
+      diagHistoryReplayHitTpl: '回放命中 {replayed} / {total} 步',
       diagHistoryPartialFallback: '部分回退',
       diagHistoryCumulativeTpl: '累计 {size}',
-      diagHistoryLastTurnTpl: '最近一轮 {size}',
+      diagHistoryLastRecordingTpl: '最近一次录制 {size}',
       diagHistoryDurableTpl: '连续 {consecutive} / {total} 步 · {size}',
       diagHistoryNoneInSession: '本会话尚无原生记录',
-      diagHistoryEmpty: '尚未记录原生轮次',
+      diagHistoryEmpty: '尚无原生记录',
       diagLogUploadLabel: '官方日志',
       diagLogExcluded: '已自动排除上传',
       diagLogAutoExclude: '含原生数据时自动排除',
@@ -164,11 +159,6 @@ window.__ModuleLoader__.load({
       diagSearchDurableSummaryTpl: '本会话 {cards} 次 · {queries} 词 · {sources} 来源',
       diagSearchSkippedValue: '已跳过注入（toolConfig 冲突）',
       diagSearchReady: '已就绪（等待调用）',
-      diagThinkingLabel: 'Thinking',
-      diagThinkingXHighApplied: 'XHIGH（会话覆盖）',
-      diagThinkingXHighPending: '已开启 XHigh 覆盖（待发送）',
-      diagThinkingNative: '跟随原生档位',
-      diagThinkingNativeWithLevelTpl: '{level}（跟随原生档位）',
       diagEmptyHint: '发出首条消息后显示实时覆盖详情',
     }
 
@@ -863,17 +853,6 @@ button.dsh-gn-dock-pill:focus-visible {
       }))
     }
 
-    function GlobeIcon() {
-      return h('svg', {
-        width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
-        strokeWidth: 1, 'aria-hidden': 'true', focusable: 'false',
-      },
-      h('path', { d: 'M7.99986 14.0887C11.3626 14.0887 14.0886 11.3627 14.0886 7.99998C14.0886 4.63727 11.3626 1.91125 7.99986 1.91125C4.63715 1.91125 1.91113 4.63727 1.91113 7.99998C1.91113 11.3627 4.63715 14.0887 7.99986 14.0887Z', stroke: 'currentColor' }),
-      h('path', { d: 'M2.34619 8H13.6538', stroke: 'currentColor', strokeLinecap: 'square' }),
-      h('path', { d: 'M7.99976 14.0889C9.23509 14.0889 10.1743 11.3629 10.1743 8.00006C10.1743 4.63739 9.23509 1.91138 7.99976 1.91138', stroke: 'currentColor' }),
-      h('path', { d: 'M7.99973 14.0889C6.76445 14.0889 5.8252 11.3629 5.8252 8.00006C5.8252 4.63739 6.76445 1.91138 7.99973 1.91138', stroke: 'currentColor' }))
-    }
-
     function ChevronDownIcon({ className }) {
       return h('svg', {
         width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
@@ -1248,7 +1227,7 @@ button.dsh-gn-dock-pill:focus-visible {
       return warnings
     }
 
-    function buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, model, xhighEnabled, t }) {
+    function buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, t }) {
       const rows = []
 
       if (routeCfg.localizePrompt) {
@@ -1278,12 +1257,12 @@ button.dsh-gn-dock-pill:focus-visible {
           const parts = [fmt(t('diagHistoryReplayHitTpl'), { replayed, total })]
           if (replayed < total) parts[0] += ` (${t('diagHistoryPartialFallback')})`
           if ((diag?.nativeBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryCumulativeTpl'), { size: formatBytes(diag.nativeBytes) }))
-          else if (recordedBytes > 0) parts.push(fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) }))
+          else if (recordedBytes > 0) parts.push(fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) }))
           value = parts.join(' · ')
         } else if ((diag?.assistantSteps ?? 0) > 0) {
           if (diag.nativeSteps === 0) {
             value = recordedBytes > 0
-              ? fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) })
+              ? fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) })
               : t('diagHistoryNoneInSession')
           } else {
             value = fmt(t('diagHistoryDurableTpl'), {
@@ -1293,7 +1272,7 @@ button.dsh-gn-dock-pill:focus-visible {
             })
           }
         } else if (recordedBytes > 0) {
-          value = fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) })
+          value = fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) })
         } else {
           value = t('diagHistoryEmpty')
         }
@@ -1326,20 +1305,6 @@ button.dsh-gn-dock-pill:focus-visible {
           value = t('diagSearchReady')
         }
         rows.push({ key: 'search', label: t('diagSearchLabel'), value })
-      }
-
-      if (supportsXHighModel(model) || activeTransport?.xhighApplied) {
-        let value
-        if (activeTransport?.xhighApplied) {
-          value = t('diagThinkingXHighApplied')
-        } else if (xhighEnabled) {
-          value = t('diagThinkingXHighPending')
-        } else if (activeTransport?.thinkingLevel) {
-          value = fmt(t('diagThinkingNativeWithLevelTpl'), { level: activeTransport.thinkingLevel })
-        } else {
-          value = t('diagThinkingNative')
-        }
-        rows.push({ key: 'thinking', label: t('diagThinkingLabel'), value })
       }
 
       return rows
@@ -1407,9 +1372,9 @@ button.dsh-gn-dock-pill:focus-visible {
         ? h(ChevronUpIcon)
         : hasBody
           ? h(React.Fragment, null,
-            h('span', { className: 'dsh-gn-search-icon-idle' }, h(GlobeIcon)),
+            h('span', { className: 'dsh-gn-search-icon-idle' }, h(GeminiMark)),
             h(ChevronDownIcon, { className: 'dsh-gn-search-chevron-hover' }))
-          : h(GlobeIcon)
+          : h(GeminiMark)
 
       const rowContent = [
         h('span', { key: 'leading', className: 'dsh-gn-search-leading' }, leading),
@@ -1664,8 +1629,6 @@ button.dsh-gn-dock-pill:focus-visible {
           const active = ready && hasAnyNativeFeature(routeCfg)
 
           const telemetry = useStatusTelemetry(active ? sessionId : null)
-          const xhighEligible = active && supportsXHighModel(model)
-          const xhighEnabled = useXHigh(xhighEligible ? sessionId : null)
           const { open, setOpen, rootRef, panelRef, anchorName, supportsAnchor, fallbackPos } = useDiagDialog(`${sessionId ?? ''}:${provider ?? ''}`)
 
           if (!active) return null
@@ -1694,10 +1657,17 @@ button.dsh-gn-dock-pill:focus-visible {
           const canPortal = open && typeof ReactDOM?.createPortal === 'function' && typeof document !== 'undefined' && Boolean(document.body)
           let dialogPortal = null
           if (canPortal) {
-            const providerLabel = profile?.displayName || provider
-            const modelLabel = activeTransport?.model || model
+            const modelId = activeTransport?.model || model
+            const group = modelState?.groups?.find(entry => entry.id === provider)
+            const catalogModel = group?.models.find(entry => entry.id === modelId)
+            const configuredModel = profile?.models?.find(entry => entry.id === modelId)
+            const providerLabel = group?.name || profile?.displayName || provider
+            const modelLabel = catalogModel?.name || configuredModel?.name || modelId
             const routeLabel = modelLabel ? `${providerLabel} / ${modelLabel}` : providerLabel
-            const rows = buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, model: modelLabel, xhighEnabled, t })
+            const routeId = modelId ? `${provider}/${modelId}` : provider
+            const hasDisplayName = providerLabel !== provider || modelLabel !== modelId
+            const routeTitle = hasDisplayName ? `${routeLabel}\n${routeId}` : routeId
+            const rows = buildDiagnosticRows({ routeCfg, diag, activePrompt, activeTransport, t })
             const hasLiveTelemetry = Boolean(activePrompt || activeTransport)
             const hasDurableStats = Boolean(
               diag && (
@@ -1725,7 +1695,7 @@ button.dsh-gn-dock-pill:focus-visible {
                 h('span', { className: 'dsh-gn-diag-title-label' },
                   h(GeminiMark, { size: 14, strokeWidth: 1.6 }),
                   h('span', null, t('brand'))),
-                h('span', { className: 'dsh-gn-diag-route', title: routeLabel }, routeLabel)),
+                h('span', { className: 'dsh-gn-diag-route', title: routeTitle }, routeLabel)),
               h('div', { className: 'dsh-gn-diag-rule', 'aria-hidden': 'true' }),
               hasWarning ? h('div', { className: 'dsh-gn-diag-warns', role: 'alert' },
                 warnings.map((message, index) => h('div', { key: index, className: 'dsh-gn-diag-warn' }, message))) : null,

@@ -247,6 +247,7 @@ async function loadClient({
   modelsValue = { providers: {} },
   modelsStatus = 'ready',
   directoryCurrent = { provider: 'google', model: 'gemini-4' },
+  directoryGroups = [],
   subagentSessions = new Set(),
   fetchImpl = null,
   trackSubscriptions = false,
@@ -380,7 +381,7 @@ async function loadClient({
       fn({
         modelDirectories: {
           directoryFor() {
-            return { store: { subscribe: () => () => {}, getSnapshot: () => ({ current: currentDirectory }) } }
+            return { store: { subscribe: () => () => {}, getSnapshot: () => ({ current: currentDirectory, groups: directoryGroups }) } }
           },
         },
         sessions,
@@ -529,10 +530,17 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
           displayName: 'My Gemini Relay',
           api: 'google-generative-ai',
           baseURL: 'https://relay.test/v1beta',
-          models: [{ id: 'gemini-4-neon' }],
+          models: [
+            { id: 'gemini-4-neon', name: 'Configured Neon' },
+            { id: 'gemini-4-argon', name: 'Configured Argon' },
+          ],
         },
       },
     },
+    directoryGroups: [
+      { id: 'other', name: 'Other Provider', models: [{ id: 'gemini-4-neon', name: 'Other Neon' }] },
+      { id: 'my-gemini', name: 'Gemini Relay', models: [{ id: 'gemini-4-neon', name: 'Gemini 4 Neon' }] },
+    ],
   })
 
   const noticeSlot = env.slots.get('conversation.composer.dock:dsh-gemini-native-notice')
@@ -551,17 +559,18 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
     searchSources: 6,
   }
 
-  const renderNotice = () => {
+  const renderNotice = (t = env.t) => {
     env.React.__beginRender(instance)
     try {
       const tree = renderTree(noticeSlot.render({
+        ...noticeSlot.meta.inject('sess-diag'),
         sessionId: 'sess-diag',
         useProjection: (key, select) => {
           if (key === 'modelSelection') return select({ next: { provider: activeProvider, model: activeModel } })
           if (key === 'geminiNativeDiagnostics') return diagProjection
           return undefined
         },
-        t: env.t,
+        t,
       }))
       return tree
     } finally {
@@ -585,12 +594,10 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   assert.equal(seps.length, 2)
   assert.equal(collectText(btn).join(''), '提示词汉化已开启·原生历史·Google 搜索')
 
-  // Subscribed to the status SSE endpoint (and xhigh SSE for Neon/Hydrogen model).
-  assert.equal(env.eventSources.length, 2)
-  const statusStream = env.eventSources.find(es => es.url.includes('/status'))
-  const xhighStream = env.eventSources.find(es => es.url.includes('/xhigh'))
-  assert.equal(statusStream?.url, 'http://localhost/api/dsh-gemini-native/status?sessionId=sess-diag')
-  assert.equal(xhighStream?.url, 'http://localhost/api/dsh-gemini-native/xhigh?sessionId=sess-diag')
+  // The panel needs only the status SSE; XHigh state belongs to its controls.
+  assert.equal(env.eventSources.length, 1)
+  const [statusStream] = env.eventSources
+  assert.equal(statusStream.url, 'http://localhost/api/dsh-gemini-native/status?sessionId=sess-diag')
 
   // Emit structured telemetry with warning-free state first.
   statusStream.emit({
@@ -633,13 +640,23 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   assert.ok(dialog)
   assert.equal(dialog.props.className, 'dsh-gn-diag-panel')
   const dialogText = collectText(dialog).join(' ')
-  assert.ok(dialogText.includes('My Gemini Relay / gemini-4-neon'))
+  const [route] = findAll(dialog, n => n.props?.className === 'dsh-gn-diag-route')
+  assert.equal(collectText(route).join(''), 'Gemini Relay / Gemini 4 Neon')
+  assert.equal(route.props.title, 'Gemini Relay / Gemini 4 Neon\nmy-gemini/gemini-4-neon')
+  assert.doesNotMatch(dialogText, /路由 ID|my-gemini\/gemini-4-neon/u)
   assert.ok(dialogText.includes('已替换 8 / 9 段'))
   assert.ok(dialogText.includes('tools:custom'))
-  assert.ok(dialogText.includes('命中 3/4 轮 (部分回退) · 累计 12KB'))
+  assert.ok(dialogText.includes('回放命中 3 / 4 步 (部分回退) · 累计 12KB'))
   assert.ok(dialogText.includes('已自动排除上传'))
   assert.ok(dialogText.includes('混用 2 个本地工具 · 本会话 2 次'))
-  assert.ok(dialogText.includes('XHIGH（会话覆盖）'))
+  assert.doesNotMatch(dialogText, /Thinking|XHIGH/u)
+
+  const savedDiag = diagProjection
+  diagProjection = undefined
+  const dialogTextOf = tree => collectText(findAll(tree, n => n.props?.role === 'dialog')[0]).join(' ')
+  assert.match(dialogTextOf(renderNotice()), /最近一次录制 2\.0KB/u)
+  assert.match(dialogTextOf(renderNotice(env.tEn)), /Replay matched 3 \/ 4 steps \(partial fallback\) · last recording 2\.0KB/u)
+  diagProjection = savedDiag
 
   // Emit warning status (url-mismatch) -> shows 5px warning dot on pill + warning banner in dialog.
   statusStream.emit({
@@ -676,9 +693,9 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   tree = renderNotice()
   pill = findAll(tree, n => n.type === 'button')[0]
   assert.equal(findAll(pill, n => n.props?.className === 'dsh-gn-dock-warn-dot').length, 0)
-  const switchedModelText = collectText(findAll(tree, n => n.props?.role === 'dialog')[0]).join(' ')
-  assert.match(switchedModelText, /gemini-4-argon/u)
-  assert.doesNotMatch(switchedModelText, /gemini-4-neon|toolConfig/u)
+  const switchedModelText = dialogTextOf(tree)
+  assert.match(switchedModelText, /Gemini Relay \/ Configured Argon/u)
+  assert.doesNotMatch(switchedModelText, /Gemini 4 Neon|toolConfig/u)
 
   // Switching provider to 'google' must NOT inherit 'my-gemini' telemetry or warning dot.
   activeProvider = 'google'
@@ -687,6 +704,13 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   pill = findAll(tree, n => n.type === 'button')[0]
   assert.equal(findAll(pill, n => n.props?.className === 'dsh-gn-dock-warn-dot').length, 0)
   assert.equal(collectText(pill).join(''), '原生历史')
+  pill.props.onClick()
+  tree = renderNotice()
+  const [fallbackRoute] = findAll(tree, n => n.props?.className === 'dsh-gn-diag-route')
+  assert.equal(collectText(fallbackRoute).join(''), 'google / gemini-4-argon')
+  assert.equal(fallbackRoute.props.title, 'google/gemini-4-argon')
+  assert.match(dialogTextOf(tree), /连续 4 \/ 5 步 · 12KB/u)
+  assert.doesNotMatch(dialogTextOf(tree), /路由 ID/u)
 
   // A new snapshot updates the structured prompt status.
   activeProvider = 'my-gemini'
@@ -706,7 +730,6 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   env.React.__unmount(instance)
   env.disposeEffects()
   assert.equal(statusStream.closed, true)
-  assert.equal(xhighStream.closed, true)
 })
 
 test('NativeStatusNotice dialog closes on Escape, outside pointerdown, and capture click, and gracefully skips portal without ReactDOM', async () => {
@@ -849,13 +872,13 @@ test('LiveSearchActivity uses compact dock pill classes and GoogleSearchCard ren
     ],
   }]
 
-  const renderCard = () => {
+  const renderCard = (cards = durableCards) => {
     env.React.__beginRender(cardInst)
     try {
       return renderTree(turnSlot.render({
         sessionId: 'sess-live',
         turn: { turn: 3 },
-        useProjection: (_key, select) => select({ 3: durableCards }),
+        useProjection: (_key, select) => select({ 3: cards }),
         t: env.t,
       }))
     } finally {
@@ -873,12 +896,22 @@ test('LiveSearchActivity uses compact dock pill classes and GoogleSearchCard ren
   assert.equal(findAll(cardTree, n => n.props?.className === 'dsh-gn-search-body').length, 0)
   assert.ok(collectText(rowBtn).join('').includes('Google 搜索'))
   assert.ok(collectText(rowBtn).join('').includes('搜索词 2 · 来源 2'))
+  const [idle] = findAll(rowBtn, n => n.props?.className === 'dsh-gn-search-icon-idle')
+  const [mark] = findAll(idle, n => n.type === 'svg')
+  assert.equal(mark.props.viewBox, '0 0 20 20')
+  assert.equal(mark.props.stroke, 'currentColor')
+  assert.equal(mark.props['aria-hidden'], 'true')
+  assert.equal(findAll(mark, n => n.type === 'path').length, 2)
+  assert.equal(findAll(rowBtn, n => n.props?.className === 'dsh-gn-search-chevron-hover').length, 1)
 
   // Click row to expand body with query tags and <ol> sources.
   rowBtn.props.onClick()
   cardTree = renderCard()
   rowBtn = findAll(cardTree, n => n.type === 'button' && n.props.className === 'dsh-gn-search-row')[0]
   assert.equal(rowBtn.props['aria-expanded'], true)
+  const [expandedIcon] = findAll(rowBtn, n => n.type === 'svg')
+  assert.equal(expandedIcon.props.viewBox, '0 0 16 16')
+  assert.equal(findAll(rowBtn, n => n.props?.className === 'dsh-gn-search-icon-idle').length, 0)
   const body = findAll(cardTree, n => n.props?.className === 'dsh-gn-search-body')[0]
   assert.ok(body)
   assert.equal(body.props['data-web'], 'search')
@@ -897,6 +930,11 @@ test('LiveSearchActivity uses compact dock pill classes and GoogleSearchCard ren
   assert.equal(allVisibleText.includes('vertexaisearch.cloud.google.com'), false)
   // Non-redirect source with distinct title shows its host subtly.
   assert.ok(allVisibleText.includes('docs.python.org'))
+
+  const summaryOnly = renderCard([{ status: 'completed', queries: [], sources: [] }])
+  assert.equal(findAll(summaryOnly, n => n.type === 'button').length, 0)
+  const [summaryMark] = findAll(summaryOnly, n => n.type === 'svg')
+  assert.deepEqual(summaryMark, mark)
 
   env.disposeEffects()
 })
