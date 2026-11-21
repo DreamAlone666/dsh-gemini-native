@@ -1,11 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { collectGoogleSearchEvidence, observeSseResponse } from './google-search-sse.js'
+import { collectGoogleSearchEvidence, observeGoogleSearchResponse, observeSseResponse } from './google-search-sse.js'
 import {
   applyGoogleSearchTools, attachNativeReplay, isObject, makeNativeReplayData, normalizeEndpoint,
   patchGenerateContentBody, responseFrame, routeIdentity, selectedCandidate,
 } from './generate-content.js'
 
-const nativeModes = new Set(['off', 'search-only', 'mixed'])
 const nativeFrameLimit = 1024 * 1024
 const replayLimit = 2 * 1024 * 1024
 const candidateLimit = 4_096
@@ -45,7 +44,7 @@ function replaceBody(init, body) {
 
 function scopedStream(scope, state, next) {
   const stream = scope.run(state, next)
-  if (!state?.native) {
+  if (!state?.nativeHistory) {
     return {
       [Symbol.asyncIterator]() {
         // Starting the waterfall alone is not enough: adapter dispatch and SDK
@@ -117,7 +116,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor) {
+export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -126,7 +125,7 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
   function warnOnce(message) {
     if (warned) return
     warned = true
-    ctx.logger.warn(`Gemini Google Search: ${message}`)
+    ctx.logger.warn(`Gemini enhancement: ${message}`)
   }
 
   function installTransport() {
@@ -142,11 +141,11 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
           && url.searchParams.get('alt') === 'sse') {
           const parsed = parseBody(init.body)
           if (parsed !== undefined) {
-            if (state.native) {
+            if (state.nativeHistory) {
               let route
               try {
                 const baseURL = normalizeEndpoint(state.baseURL)
-                route = { baseURL, provider: state.provider, search: state.search }
+                route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
                 route.identity = routeIdentity(route)
               } catch { /* Non-standard endpoint stays untouched. */ }
               if (route) {
@@ -155,7 +154,7 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
                   const forwarded = patched.changed ? replaceBody(init, JSON.stringify(patched.body)) : init
                   const capture = { route, prefix: patched.prefix, frames: [], savedBytes: 0, overflow: false, invalid: false }
                   state.capture = capture
-                  const report = reportFor?.(state.sessionId)
+                  const report = reportFor?.(state.sessionId, true)
                   const observeSearch = report ? collectGoogleSearchEvidence(report) : undefined
                   const result = previous.call(this, input, forwarded)
                   return Promise.resolve(result).then(response => observeSseResponse(response, json => {
@@ -175,15 +174,15 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
                   }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
                 }
               }
-            } else {
-              const patched = applyGoogleSearchTools(parsed, 'mixed')
+            } else if (state.googleSearch) {
+              const patched = applyGoogleSearchTools(parsed, true)
               if (patched.changed) {
                 const forwarded = replaceBody(init, JSON.stringify(patched.body))
-                // The loop publishes attempt start before it first pulls this lazy
-                // stream. Bind once, before calling the network transport.
-                const observe = observerFor?.(state.sessionId)
+                const report = reportFor?.(state.sessionId, false)
                 const result = previous.call(this, input, forwarded)
-                return observe ? Promise.resolve(result).then(observe) : result
+                return report ? Promise.resolve(result).then(response => {
+                  try { return observeGoogleSearchResponse(response, report) } catch { return response }
+                }) : result
               }
             }
           }
@@ -192,7 +191,7 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
       return previous.apply(this, arguments)
     }
     try { globalThis.fetch = fetchWithGeminiEnhancement } catch {
-      warnOnce('this Host does not allow wrapping fetch; search remains inactive.')
+      warnOnce('this Host does not allow wrapping fetch; Gemini transport enhancements remain inactive.')
       return
     }
     transport = { previous, wrapper: fetchWithGeminiEnhancement }
@@ -201,20 +200,23 @@ export function googleSearch(ctx, config, matchesModelId, observerFor, reportFor
   ctx.on('llm/stream', (request, next) => {
     let state
     if (active && request.purpose === undefined && request.sessionId !== undefined) {
-      const modes = config.modelPageRoutes?.get?.()
-      const nativeMode = modes && Object.hasOwn(modes, request.provider) ? modes[request.provider] : undefined
-      const wantsNative = nativeModes.has(nativeMode)
-      const wantsSearch = !wantsNative && config.enableGoogleSearch.get() && matchesModelId(request.model, config.modelIds.get())
-      if (wantsNative || wantsSearch) {
+      const routeCfg = routeConfigOf(config.routes.get(), request.provider)
+      if (routeCfg.nativeHistory || routeCfg.googleSearch) {
         // Use the mounted LLM module's identity predicate, not a second import
         // whose marker WeakSet might belong to a different module generation.
         const isAgentLoopRequest = loopRequestPredicate(ctx)
         if (!isAgentLoopRequest) {
-          warnOnce('cannot identify Agent Loop requests on this DSH version; search remains inactive.')
+          warnOnce('cannot identify Agent Loop requests on this DSH version; Gemini transport enhancements remain inactive.')
         } else if (isAgentLoopRequest(request)) {
-          state = wantsNative
-            ? { native: true, search: nativeMode, provider: request.provider, model: request.model, sessionId: request.sessionId, request, capture: null }
-            : { native: false, search: 'mixed', provider: request.provider, model: request.model, sessionId: request.sessionId }
+          state = {
+            nativeHistory: routeCfg.nativeHistory,
+            googleSearch: routeCfg.googleSearch,
+            provider: request.provider,
+            model: request.model,
+            sessionId: request.sessionId,
+            request,
+            capture: null,
+          }
         }
       }
     }

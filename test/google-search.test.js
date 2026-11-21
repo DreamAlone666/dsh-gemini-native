@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
-import { googleSearch } from '../google-search.js'
+import { geminiTransport } from '../gemini-transport.js'
 import { searchActivityPath } from '../google-search-activity.js'
 
 const model = 'gemini-4-hydrogen'
@@ -26,10 +26,10 @@ function transportFixture(t) {
   globalThis.fetch = offlineFetch
   t.after(() => { globalThis.fetch = original })
   let cleanup
-  let enabled = true
+  let routes = { mock: { localizePrompt: false, nativeHistory: false, googleSearch: true } }
   let markerMissing = false
   const warnings = []
-  googleSearch({
+  geminiTransport({
     loader: { resolve: () => {
       if (markerMissing) throw new Error('no llm entry')
       return { moduleNamespace: { isAgentLoopRequest: request => request.agent === true } }
@@ -37,12 +37,12 @@ function transportFixture(t) {
     logger: { warn: message => warnings.push(message) },
     on: (event, fn) => handlers.set(event, fn),
     effect: start => { cleanup = start() },
-  }, { enableGoogleSearch: { get: () => enabled }, modelIds: { get: () => [model] } }, (m, rules) => rules.includes(m))
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf)
 
-  function run({ loop = true, purpose, input = generation, rawBody = JSON.stringify(baseBody), intact = false } = {}) {
+  function run({ provider = 'mock', loop = true, purpose, input = generation, rawBody = JSON.stringify(baseBody), intact = false } = {}) {
     const headers = new Headers({ 'x-goog-api-key': 'synthetic', 'content-length': '1' })
     const signal = new AbortController().signal
-    const request = Object.freeze({ provider: 'mock', model, sessionId: 'test', agent: loop, purpose })
+    const request = Object.freeze({ provider, model, sessionId: 'test', agent: loop, purpose })
     const init = { method: 'POST', headers, signal, body: rawBody }
     const stream = handlers.get('llm/stream')(request, async function* () {
       await Promise.resolve()
@@ -59,20 +59,28 @@ function transportFixture(t) {
       return call.init
     })
   }
-  return { run, offlineFetch, cleanup, warnings, setEnabled: value => { enabled = value }, loseMarker: () => { markerMissing = true } }
+  return {
+    run,
+    offlineFetch,
+    cleanup,
+    warnings,
+    setRoutes: value => { routes = value },
+    loseMarker: () => { markerMissing = true },
+  }
 }
 
-test('rewrites only scoped Gemini requests, preserving request and response ownership', async t => {
+test('rewrites only scoped Gemini provider requests, preserving request and response ownership', async t => {
   const f = transportFixture(t)
-  f.setEnabled(false)
+  f.setRoutes({})
   await f.run({ intact: true })
   assert.equal(globalThis.fetch, f.offlineFetch)
-  f.setEnabled(true)
+  f.setRoutes({ mock: { localizePrompt: false, nativeHistory: false, googleSearch: true } })
   const init = await f.run()
   assert.deepEqual(JSON.parse(init.body), {
     ...baseBody, tools: [...baseBody.tools, { googleSearch: {} }], toolConfig: { includeServerSideToolInvocations: true },
   })
   assert.deepEqual(Object.fromEntries(init.headers), { 'x-goog-api-key': 'synthetic' })
+  await f.run({ provider: 'other-provider', intact: true })
   for (const input of [
     `${baseURL}/chat/completions`, `${baseURL}/models/${model}:streamGenerateContent`,
     `${baseURL}/models/another:streamGenerateContent?alt=sse`, generation.replace('/relay/', '/other/'),
@@ -80,13 +88,13 @@ test('rewrites only scoped Gemini requests, preserving request and response owne
   ]) await f.run({ input, intact: true })
   await f.run({ loop: false, intact: true })
   await f.run({ purpose: 'session-title', intact: true })
-  f.setEnabled(false)
+  f.setRoutes({ mock: { localizePrompt: true, nativeHistory: false, googleSearch: false } })
   await f.run({ intact: true })
   f.cleanup()
   assert.equal(globalThis.fetch, f.offlineFetch)
 })
 
-test('handles search-only requests and respects existing tools and calling modes', async t => {
+test('handles search-only payloads and respects existing tools and calling modes', async t => {
   const f = transportFixture(t)
   const raw = body => JSON.stringify({ ...baseBody, ...body })
   const searchOnly = await f.run({ rawBody: raw({ tools: undefined }) })
@@ -121,7 +129,7 @@ test('replaces only web_search and preserves other declarations, grouping and ro
   assert.deepEqual(JSON.parse(combinedEntry.body).tools, [anotherNativeTool, { googleSearch: {} }])
   await f.run({ rawBody: raw(grouped, calling(['web_search'])), intact: true })
   await f.run({ rawBody: raw(grouped, { functionCallingConfig: { mode: 'AUTO' } }), intact: true })
-  f.setEnabled(false)
+  f.setRoutes({})
   await f.run({ rawBody: raw(grouped), intact: true })
   f.cleanup()
 })
@@ -139,7 +147,7 @@ test('disposal leaves a later fetch wrapper installed and disables the inner wra
 
 const installed = process.env.DSH_INSTALL_DIR
 
-test('installed DSH: Loader, actual model dispatch, SDK payload, activity and live rules', { skip: !installed, timeout: 5000 }, async t => {
+test('installed DSH: Loader, per-provider transport scoping, SDK payload, activity and live updates', { skip: !installed, timeout: 5000 }, async t => {
   const require = createRequire(join(installed, 'package.json'))
   const load = spec => import(pathToFileURL(require.resolve(spec)).href)
   const { Context } = await load('@deepseek-ai/cordis')
@@ -224,26 +232,35 @@ test('installed DSH: Loader, actual model dispatch, SDK payload, activity and li
   const declarations = label => captures.get(label).body.tools.flatMap(tool =>
     tool.functionDeclarations?.map(item => item.name) ?? [tool.function?.name].filter(Boolean))
   const localTools = ['read_mock', 'web_search', 'web_fetch']
+
   await invoke('default-off')
   assert.equal(injected('default-off'), false)
   assert.deepEqual(declarations('default-off'), localTools)
   assert.equal(globalThis.fetch, offline)
-  await update({ enableGoogleSearch: true })
+
+  // Enable Google Search on `gemini` (all models on that provider), leave `gateway` unconfigured.
+  await update({ routes: { gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true } } })
   assert.strictEqual(ctx.loader.resolve('gemini-enhancement').fiber, fiber)
   await Promise.all([
-    invoke('matched'), invoke('gateway', { provider: 'gateway' }), invoke('openai', { provider: 'compatible' }),
-    invoke('other-model', { selected: 'gemini-3-flash' }), invoke('one-shot', { loop: false }), invoke('title', { loop: false, purpose: 'session-title' }),
+    invoke('matched'),
+    invoke('second-model', { selected: 'gemini-3-flash' }),
+    invoke('gateway', { provider: 'gateway' }),
+    invoke('openai', { provider: 'compatible' }),
+    invoke('one-shot', { loop: false }),
+    invoke('title', { loop: false, purpose: 'session-title' }),
   ])
-  for (const label of ['matched', 'gateway']) {
-    assert.equal(injected(label), true)
+  for (const label of ['matched', 'second-model']) {
+    assert.equal(injected(label), true, label)
     const { body } = captures.get(label)
     assert.equal(body.toolConfig.includeServerSideToolInvocations, true)
     assert.deepEqual(declarations(label), ['read_mock', 'web_fetch'])
   }
-  for (const label of ['other-model', 'one-shot', 'title', 'openai']) {
+  for (const label of ['gateway', 'one-shot', 'title', 'openai']) {
     assert.equal(injected(label), false, label)
     assert.deepEqual(declarations(label), localTools, label)
   }
+
+  // Search-only without nativeHistory falls back to temporary activity cards.
   async function activities() {
     const result = routes.get(searchActivityPath).fetch(new Request(`http://localhost${searchActivityPath}?sessionId=offline`))
     const reader = result.body.getReader()
@@ -260,16 +277,16 @@ test('installed DSH: Loader, actual model dispatch, SDK payload, activity and li
   assert.deepEqual(await activities(), { liveTurn: null, cards: [{
     id: '5:2:offline:1', turn: 5, step: 2, status: 'completed', queries: ['offline Google query'], sources: [],
   }] })
-  await update({ enableGoogleSearch: true, modelIds: [] })
-  await invoke('not-matched-live')
-  assert.equal(injected('not-matched-live'), false)
-  assert.deepEqual(declarations('not-matched-live'), localTools)
-  await update({ enableGoogleSearch: false })
+
+  await update({ routes: {} })
   await invoke('toggle-off-live')
   assert.equal(injected('toggle-off-live'), false)
   assert.deepEqual(declarations('toggle-off-live'), localTools)
   assert.strictEqual(ctx.loader.resolve('gemini-enhancement').fiber, fiber)
-  await ctx.loader.update('gemini-enhancement', { config: { enableGoogleSearch: true }, disabled: true })
+  await ctx.loader.update('gemini-enhancement', {
+    config: { routes: { gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true } } },
+    disabled: true,
+  })
   assert.equal(globalThis.fetch, offline)
   await invoke('disabled-row')
   assert.equal(injected('disabled-row'), false)

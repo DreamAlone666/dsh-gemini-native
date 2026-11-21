@@ -70,12 +70,14 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     await ctx.loader.await()
     const route = () => ctx.settings.describe({ redactSecrets: true }).find(row => row.ns === 'llm-pi-ai')
     const modelCatalog = () => ctx.llm.listModels(routeId).then(models => models.map(entry => entry.id))
-    const mutate = async (ns, path, value) => {
+    const mutate = async (ns, ops) => {
       const form = ctx.settings.describe().find(row => row.ns === ns)
-      await ctx.settings.mutate(ns, [{ op: 'set', path, value }], form.revision)
+      await ctx.settings.mutate(ns, ops, form.revision)
     }
-    const setApi = value => mutate('llm-pi-ai', ['providers', routeId, 'api'], value)
-    const setMode = value => mutate(enhancer, ['modelPageRoutes', routeId], value)
+    const setApi = value => mutate('llm-pi-ai', [{ op: 'set', path: ['providers', routeId, 'api'], value }])
+    const setRoute = value => mutate(enhancer, value
+      ? [{ op: 'set', path: ['routes', routeId], value }]
+      : [{ op: 'unset', path: ['routes', routeId] }])
     assert.equal(route().value.providers[routeId].api, 'openai-completions')
     assert.deepEqual(await modelCatalog(), [model])
 
@@ -109,7 +111,7 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     await setApi('google-generative-ai')
     const originalRoute = route().value.providers[routeId]
     assert.ok(!isNative(await finish(await prepare())), 'plain Gemini API does not opt in to the plugin')
-    await setMode('mixed')
+    await setRoute({ localizePrompt: true, nativeHistory: true, googleSearch: true })
     assert.deepEqual(route().value.providers[routeId], originalRoute)
     const beforePreparing = requests.length
     const captured = await prepare()
@@ -135,7 +137,7 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     assert.deepEqual(await modelCatalog(), [model])
     assert.ok(!isNative(await finish(await prepare({ purpose: 'session-title' }, { loop: false }))))
 
-    // File attachments and orphaned tool histories now work natively via pi-ai instead of falling back!
+    // File attachments and orphaned tool histories work natively via pi-ai.
     const withFile = await finish(await prepare({ messages: [{ role: 'user', content: [
       { type: 'text', text: 'see attached notes' },
       { type: 'file', attachment: { attachmentId: 'offline-notes', name: 'notes.txt', bytes: 20 } },
@@ -148,23 +150,25 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     ] }))
     assert.ok(isNative(orphan))
 
-    await setMode('search-only')
-    assert.ok(isNative(await finish(await prepare())))
-    assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch), 'search-only does not mix with read_mock')
-    assert.ok(requests.at(-1).body.tools[0].functionDeclarations.some(tool => tool.name === 'web_search'))
-    assert.ok(isNative(await finish(await prepare({ tools: tools.filter(tool => tool.name === 'web_search') }))))
-    assert.deepEqual(requests.at(-1).body.tools, [{ googleSearch: {} }])
-
-    await setMode('off')
+    // Native history on, Google Search off: keeps web_search intact and still records native parts.
+    await setRoute({ localizePrompt: false, nativeHistory: true, googleSearch: false })
     assert.ok(isNative(await finish(await prepare())))
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.ok(requests.at(-1).body.tools[0].functionDeclarations.some(tool => tool.name === 'web_search'))
 
-    await setMode('standard')
-    assert.ok(!isNative(await finish(await prepare())), 'plugin page can restore the normal Gemini protocol')
+    // Google Search on without native history: replaces web_search with Google Search, skips native recording.
+    await setRoute({ localizePrompt: false, nativeHistory: false, googleSearch: true })
+    assert.ok(!isNative(await finish(await prepare())))
+    assert.deepEqual(requests.at(-1).body.tools.map(tool => tool.functionDeclarations?.map(fn => fn.name) ?? 'Google Search'), [['read_mock'], 'Google Search'])
+    assert.equal(requests.at(-1).body.toolConfig.includeServerSideToolInvocations, true)
+
+    // Unsetting the route restores normal pi-ai Gemini behavior completely.
+    await setRoute(undefined)
+    assert.ok(!isNative(await finish(await prepare())), 'clearing route restores normal Gemini protocol')
+    assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.deepEqual(route().value.providers[routeId], originalRoute)
 
-    await setMode('off')
+    await setRoute({ localizePrompt: false, nativeHistory: true, googleSearch: false })
     gatewayStatus = 400
     const count = requests.length
     assert.equal((await finish(await prepare())).reason.kind, 'error')

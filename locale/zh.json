@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Gemini 增强",
-    "description": "根据模型 ID 规则将已知的 DSH 系统提示词汉化。配置页可选显示汉化状态，也可在匹配的 Gemini 原生 API 对话请求中用实验性的 Google 原生搜索替换 DSH 网页搜索。不改路由，不另发模型请求。两个选项均默认关闭。"
+    "description": "在「设置 → 模型」的 Gemini API 供应商卡片中按供应商就地配置增强能力：系统提示词汉化、Gemini 原生历史回放与 Google 原生搜索（替换内置 web_search）。全部选项默认关闭，不更改模型路由，也不另发请求。"
   }
 }

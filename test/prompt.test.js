@@ -31,16 +31,25 @@ function intercept(raw) {
   return { listener, config }
 }
 
-function selection(model, provider = 'different-provider') {
-  return { modelSelection: { model, provider } }
+function selection(provider, model = 'gemini-4-argon') {
+  return { modelSelection: { provider, model } }
 }
 
-test('localizes Gemini 4 only, using the captured model regardless of provider', async () => {
-  const { listener } = intercept({})
-  for (const model of ['gemini-4', 'gemini-4-argon', 'gemini-4-hydrogen-preview', 'gemini-4.1-pro']) {
-    for (const provider of ['google', 'gateway', undefined]) {
+test('localizes only providers with localizePrompt enabled, regardless of model ID', async () => {
+  const defaultOff = intercept({}).listener
+  assert.strictEqual(await defaultOff(null, selection('google', 'gemini-4-argon'), () => fixture), fixture)
+
+  const { listener } = intercept({
+    routes: {
+      google: { localizePrompt: true },
+      'gemini-relay': { localizePrompt: true, nativeHistory: true },
+      'history-only': { nativeHistory: true, googleSearch: true },
+    },
+  })
+  for (const provider of ['google', 'gemini-relay']) {
+    for (const model of ['gemini-4-argon', 'gemini-2.5-pro', 'custom-alias']) {
       let calls = 0
-      const result = await listener(null, selection(model, provider), () => {
+      const result = await listener(null, selection(provider, model), () => {
         calls += 1
         return Promise.resolve(fixture)
       })
@@ -49,15 +58,18 @@ test('localizes Gemini 4 only, using the captured model regardless of provider',
     }
   }
   for (const context of [
-    selection('gemini-3.5-flash-lite', 'gemini-4-argon'), selection('gpt-6.2-sol', 'google'),
-    selection('gemini-40-argon'), selection('Gemini-4-Argon'), selection('google/gemini-4-argon'),
-    { agent: { options: { model: 'gemini-4-argon' } } }, {}, undefined,
+    selection('history-only', 'gemini-4-argon'),
+    selection('openai', 'gemini-4-argon'),
+    selection('', 'gemini-4-argon'),
+    { agent: { options: { provider: 'google', model: 'gemini-4-argon' } } },
+    {},
+    undefined,
   ]) assert.strictEqual(await listener(null, context, () => fixture), fixture)
 })
 
 test('translates only exact built-in sections from the downstream presentation', async () => {
-  const { listener } = intercept({})
-  const result = await listener(null, selection('gemini-4-argon'), () => fixture)
+  const { listener } = intercept({ routes: { google: { localizePrompt: true } } })
+  const result = await listener(null, selection('google', 'gemini-4-argon'), () => fixture)
   assert.deepEqual(result.sections.map(s => s.name), fixture.sections.map(s => s.name))
   assert.deepEqual(result.sections[1], {
     name: 'deployment:persona-prefix', text: '你是由 {{model}} 模型驱动的编程智能体。', interpolate: true,
@@ -69,33 +81,25 @@ test('translates only exact built-in sections from the downstream presentation',
   assert.equal(fixture.sections[1].text, persona)
 })
 
-test('matches configured exact IDs, prefixes, and namespaced IDs without touching provider', async () => {
-  const { listener } = intercept({ modelIds: ['alt-gemini', 'models/gemini-4-*'] })
-  for (const model of ['alt-gemini', 'models/gemini-4-argon']) {
-    assert.notStrictEqual(await listener(null, selection(model), () => fixture), fixture)
-  }
-  for (const model of ['alt-gemini-preview', 'gemini-4-argon', 'google/models/gemini-4-argon']) {
-    assert.strictEqual(await listener(null, selection(model, 'alt-gemini'), () => fixture), fixture)
-  }
-  const none = intercept({ modelIds: [] }).listener
-  assert.strictEqual(await none(null, selection('gemini-4-argon'), () => fixture), fixture)
-})
-
-test('rejects malformed model rules and keeps the array editable by DSH Settings', () => {
-  for (const rule of ['', '*', 'gemini-*preview', 'gemini-**', 'a b', 'gemini-4\n', 42]) {
-    assert.throws(() => plugin.Config({ modelIds: [rule] }), `rule should be rejected: ${JSON.stringify(rule)}`)
-  }
-  assert.equal(plugin.Config.dict.modelIds.meta.volatile, true)
-  assert.equal(plugin.Config.dict.showLocalizationNotice.meta.volatile, true)
-  assert.equal(plugin.Config.dict.enableGoogleSearch.meta.volatile, true)
-  assert.equal(plugin.Config({}).enableGoogleSearch.get(), false)
-  assert.equal(plugin.Config({}).showLocalizationNotice.get(), false)
-  assert.deepEqual(plugin.Config({}).modelIds.get(), ['gemini-4', 'gemini-4-*', 'gemini-4.*'])
+test('validates route config schema and keeps fields editable by DSH Settings', () => {
+  assert.throws(() => plugin.Config({ routes: { google: { localizePrompt: 'yes' } } }))
+  assert.throws(() => plugin.Config({ routes: { google: { nativeHistory: 1 } } }))
+  assert.throws(() => plugin.Config({ routes: { google: { googleSearch: 'mixed' } } }))
+  assert.equal(plugin.Config.dict.routes.meta.volatile, true)
+  assert.equal(plugin.Config.dict.showStatusNotice.meta.volatile, true)
+  const defaults = plugin.Config({})
+  assert.deepEqual(defaults.routes.get(), {})
+  assert.equal(defaults.showStatusNotice.get(), false)
+  assert.deepEqual(plugin.routeConfigOf(defaults.routes.get(), 'google'), {
+    localizePrompt: false,
+    nativeHistory: false,
+    googleSearch: false,
+  })
 })
 
 const installed = process.env.DSH_INSTALL_DIR
 
-test('installed DSH: mount from bundle patch, render, update matches live, and unload', { skip: !installed }, async (t) => {
+test('installed DSH: mount from bundle patch, render, update per-provider routes live, and unload', { skip: !installed }, async (t) => {
   const require = createRequire(join(installed, 'package.json'))
   const load = spec => import(pathToFileURL(require.resolve(spec)).href)
   const { Context } = await load('@deepseek-ai/cordis')
@@ -117,18 +121,11 @@ test('installed DSH: mount from bundle patch, render, update matches live, and u
   t.after(() => mounted.dispose())
   await mounted
 
-  const gemini = await ctx.systemPrompt.assemble(selection('gemini-4-argon', 'openai-compatible'))
-  assert.match(renderPrompt(gemini), /你是由 gemini-4-argon 模型驱动的编程智能体。/u)
-  assert.equal(gemini.tools[0].description, 'Original tool')
-  assert.equal(gemini.contexts[0].text, 'Original context')
-  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gpt-6.2-sol', 'gemini-4'))), /^You are/u)
-
-  const complete = ctx.systemPrompt.section({ name: 'custom', order: 0, text: 'Complete custom prompt', complete: true })
-  assert.equal(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-4-argon'))), 'Complete custom prompt')
-  complete()
+  // Off by default on all providers.
+  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('google', 'gemini-4-argon'))), /^You are/u)
 
   // Use the real Settings service and an in-memory ConfigEditor so this
-  // integration exercises the Web write contract without editing a profile.
+  // integration exercises the Web write contract (set + unset) without editing a profile.
   ctx.provide('loader', { await: async () => {} })
   ctx.provide('profileContext', { home: fileURLToPath(new URL('./', import.meta.url)) })
   const entry = { id: row.id, options: { id: row.id, config: row.config }, fiber: mounted }
@@ -146,17 +143,39 @@ test('installed DSH: mount from bundle patch, render, update matches live, and u
   await settings
   const [form] = ctx.settings.describe()
   assert.equal(form.ns, row.id)
-  assert.deepEqual(form.value, { modelPageRoutes: {}, modelIds: ['gemini-4', 'gemini-4-*', 'gemini-4.*'], showLocalizationNotice: false, enableGoogleSearch: false })
-  const rules = [
-    { op: 'set', path: ['modelIds'], value: ['my-gemini-alias'] },
-    { op: 'set', path: ['showLocalizationNotice'], value: true },
-    { op: 'set', path: ['enableGoogleSearch'], value: true },
+  assert.deepEqual(form.value, { routes: {}, showStatusNotice: false })
+
+  const enableOps = [
+    { op: 'set', path: ['routes', 'gemini-relay'], value: { localizePrompt: true, nativeHistory: true, googleSearch: false } },
+    { op: 'set', path: ['showStatusNotice'], value: true },
   ]
-  await ctx.settings.mutate(row.id, rules, form.revision)
-  assert.deepEqual(ctx.settings.describe()[0].value, { modelPageRoutes: {}, modelIds: ['my-gemini-alias'], showLocalizationNotice: true, enableGoogleSearch: true })
-  await assert.rejects(ctx.settings.mutate(row.id, rules, form.revision), /revision/i)
-  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-4-argon'))), /^You are/u)
-  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('my-gemini-alias'))), /你是由 my-gemini-alias 模型/u)
+  await ctx.settings.mutate(row.id, enableOps, form.revision)
+  const afterEnable = ctx.settings.describe()[0]
+  assert.deepEqual(afterEnable.value, {
+    routes: { 'gemini-relay': { localizePrompt: true, nativeHistory: true, googleSearch: false } },
+    showStatusNotice: true,
+  })
+  await assert.rejects(ctx.settings.mutate(row.id, enableOps, form.revision), /revision/i)
+
+  const localized = await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))
+  assert.match(renderPrompt(localized), /你是由 gemini-4-argon 模型驱动的编程智能体。/u)
+  assert.equal(localized.tools[0].description, 'Original tool')
+  assert.equal(localized.contexts[0].text, 'Original context')
+  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('other-provider', 'gemini-4-argon'))), /^You are/u)
+
+  const complete = ctx.systemPrompt.section({ name: 'custom', order: 0, text: 'Complete custom prompt', complete: true })
+  assert.equal(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))), 'Complete custom prompt')
+  complete()
+
+  // Clearing a route via unset restores default English prompt cleanly.
+  await ctx.settings.mutate(row.id, [{ op: 'unset', path: ['routes', 'gemini-relay'] }], afterEnable.revision)
+  assert.deepEqual(ctx.settings.describe()[0].value, { routes: {}, showStatusNotice: true })
+  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))), /^You are/u)
+
+  // Re-enable then unload plugin to verify disposal cleans up listeners.
+  const latest = ctx.settings.describe()[0]
+  await ctx.settings.mutate(row.id, [{ op: 'set', path: ['routes', 'gemini-relay'], value: { localizePrompt: true, nativeHistory: false, googleSearch: false } }], latest.revision)
+  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))), /你是由 gemini-4-argon 模型/u)
   await mounted.dispose()
-  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('my-gemini-alias'))), /^You are/u)
+  assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))), /^You are/u)
 })

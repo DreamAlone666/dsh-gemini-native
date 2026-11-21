@@ -5,21 +5,36 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const namespace = 'dshGeminiEnhancement'
     const pluginId = 'dsh-gemini-enhancement'
+
     const en = {
-      title: 'Model ID rules',
-      enableSearch: 'Google Search on pi-ai routes (experimental)',
-      searchHelp: 'Off by default. Applies the model ID rules above to pi-ai Gemini Developer API conversations not already managed below; cards are temporary.',
-      routeNativeMode: 'Gemini native history (experimental)',
-      routeNativeDefault: 'Keep the existing path (no native history)',
-      routeNativeReplay: 'Preserve native parts',
-      routeNativeSearchOnly: 'Preserve parts + Google Search when no other functions are available',
-      routeNativeMixed: 'Preserve parts + Google Search with local functions',
-      routeNativeHelp: 'Choose a mode for a configured Gemini API provider from Settings → Models. Runs on top of the built-in pi-ai adapter (keeping images, custom headers, auth, and streaming). Only enable mixed tools on compatible endpoints.',
-      routeNativeNone: 'No configured Gemini API candidates. Add or configure a Gemini API provider in Settings → Models.',
-      routeNativeLoading: 'Reading providers from Settings → Models…',
-      routeNativeUnreadable: 'Cannot read model settings now. You can still turn off saved native modes.',
-      routeNativeUnavailable: 'Not currently a Gemini API candidate. You can still turn off its native mode.',
-      routeNativeDraftUnavailable: 'A provider in the draft is no longer available. Turn off its native mode or discard the draft.',
+      brand: 'Gemini Enhancement',
+      localizePrompt: 'Localize system prompt',
+      localizePromptTitle: 'Replace known built-in DSH English system prompts with Simplified Chinese on this provider.',
+      nativeHistory: 'Native history replay',
+      nativeHistoryTitle: 'Preserve and replay Gemini native parts (thought signatures, server-side tool parts, and opaque fields). Excludes sessions containing native data from official session log uploads.',
+      googleSearch: 'Google Search',
+      googleSearchTitle: 'Replace built-in web_search with native Google Search while keeping all other local tools.',
+      searchWithoutHistoryWarn: 'Without native history replay, follow-up turns after mixing Google Search with local tools may fail.',
+      nonGeminiRoute: 'This provider is no longer a Gemini API route. You can clear its saved Gemini enhancements.',
+      clear: 'Clear',
+      clearing: 'Clearing…',
+      saving: 'Saving…',
+      readOnly: 'Read-only',
+      saveFailed: 'Could not save Gemini enhancement settings. Please try again.',
+      saveConflict: 'Settings changed elsewhere. Please retry.',
+      pageIntro: 'Configure per-provider enhancements (system prompt localization, native history replay, and Google Search) directly inside each Gemini API provider card under Settings → Models.',
+      showStatusNotice: 'Show active Gemini enhancements below the composer',
+      showStatusNoticeHelp: 'Displays active enhancements when an enhanced Gemini provider is selected, and confirms once a request uses the localized prompt. Turning this off does not disable any enhancement.',
+      activeRoutesHeading: 'Configured Gemini routes',
+      activeRoutesEmpty: 'No Gemini API providers have enhancements enabled yet. Open Settings → Models and toggle enhancements on any Gemini API provider card.',
+      routeStaleTag: 'Not currently a Gemini API provider',
+      loading: 'Loading settings…',
+      unavailable: 'Configuration is unavailable. Check that the bundle and its plugin row are enabled, then reopen this page.',
+      statusMatched: 'Prompt localization matched',
+      statusLocalized: 'Prompt localized',
+      statusNativeHistory: 'Native history',
+      statusGoogleSearch: 'Google Search',
+      source: 'Source: Gemini Enhancement plugin',
       activityTitle: 'Google Search (Gemini)',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
@@ -28,40 +43,37 @@ window.__ModuleLoader__.load({
       activityQueries: 'Search queries',
       activitySourceCount: 'Sources',
       activitySources: 'Sources returned by Google (links open in a new tab)',
-      searchUnavailable: 'The current Host does not provide this setting.',
-      showNotice: 'System prompt localization notice',
-      noticeHelp: 'Show a match as soon as you select an eligible model. The notice confirms localization once a request uses it. Turning it off does not disable localization.',
-      matched: 'System prompt localization matched',
-      localized: 'System prompt localized',
-      source: 'Source: Gemini 增强 plugin',
-      help: 'Enter one case-sensitive model ID per line, without the provider ID. For example, gemini-4-argon matches one model; gemini-4-* matches a prefix. A * is allowed only at the end. An empty list matches no models.',
-      invalid: 'Each line needs a model ID or a non-empty prefix followed by *. No whitespace is allowed inside a rule.',
-      loading: 'Loading model ID rules…',
-      unavailable: 'Configuration is unavailable. Check that the bundle and its plugin row are enabled, then reopen this page.',
-      readOnly: 'This configuration is read-only.',
-      save: 'Save',
-      saving: 'Saving…',
-      saved: 'Settings saved.',
-      refused: 'Settings were not saved. Your draft is still here.',
-      failed: 'Could not confirm the save. Check the current settings before trying again.',
-      conflict: 'These settings changed elsewhere. Copy any edits you want to keep before showing the current settings.',
-      reload: 'Discard draft and show current settings',
     }
+
     const zh = {
-      title: '模型 ID 规则',
-      enableSearch: 'pi-ai 路由的 Google 原生搜索（实验）',
-      searchHelp: '默认关闭。沿用上面的模型 ID 规则，仅针对未被下方原生历史接管的 pi-ai Gemini Developer API 对话；搜索卡片只临时保留。',
-      routeNativeMode: 'Gemini 原生历史（实验）',
-      routeNativeDefault: '沿用原路径（不保留原生历史）',
-      routeNativeReplay: '保留原生 parts',
-      routeNativeSearchOnly: '保留 parts；没有其他函数时使用 Google 搜索',
-      routeNativeMixed: '保留 parts；混用 Google 搜索与本地函数',
-      routeNativeHelp: '先在「设置 → 模型」保存 Gemini API 供应商，再在这里按供应商选模式。复用内置 pi-ai Adapter（保留图片、自定义 headers、鉴权与流式渲染），仅增量做原生 parts 留存/回放与搜索。仅对已确认支持混用的端点开启混用。',
-      routeNativeNone: '没有已配置的 Gemini API 候选供应商。请先在「设置 → 模型」中添加或配置。',
-      routeNativeLoading: '正在读取模型页中的供应商…',
-      routeNativeUnreadable: '暂时无法读取模型设置，仍可关闭已保存的原生模式。',
-      routeNativeUnavailable: '当前不是 Gemini API 候选供应商，仍可关闭原生模式。',
-      routeNativeDraftUnavailable: '草稿中的供应商已不可用。请关闭其原生模式，或放弃草稿。',
+      brand: 'Gemini 增强',
+      localizePrompt: '系统提示词汉化',
+      localizePromptTitle: '在此供应商上将已知的 DSH 内置英文系统提示词替换为简体中文（防 Gemini 4 系列降智）。',
+      nativeHistory: '原生历史回放',
+      nativeHistoryTitle: '保留并回放 Gemini 原生 parts（思维签名、服务端工具记录与未知字段）；含原生数据的会话将跳过官方会话日志上传。',
+      googleSearch: 'Google 原生搜索',
+      googleSearchTitle: '保留其余本地工具的同时，用 Google 原生搜索替换内置 web_search。',
+      searchWithoutHistoryWarn: '未开启原生历史回放时，混用 Google 原生搜索与本地工具的续轮可能失败。',
+      nonGeminiRoute: '当前已非 Gemini API 供应商，可清除此前保存的 Gemini 增强配置。',
+      clear: '清除',
+      clearing: '清除中…',
+      saving: '保存中…',
+      readOnly: '只读',
+      saveFailed: '未能保存 Gemini 增强设置，请重试。',
+      saveConflict: '设置已在别处更改，请重试。',
+      pageIntro: '各 Gemini API 供应商的「系统提示词汉化」「原生历史回放」与「Google 原生搜索」均已整合到「设置 → 模型」中对应供应商卡片内就地配置。',
+      showStatusNotice: '在输入框下方显示 Gemini 增强状态',
+      showStatusNoticeHelp: '切到已开启增强的 Gemini 供应商时，在输入框下方显示当前生效项；请求确认使用汉化后更新为已汉化。关闭此项不影响增强本身。',
+      activeRoutesHeading: '已配置的 Gemini 供应商',
+      activeRoutesEmpty: '尚未对任何 Gemini API 供应商启用增强。请前往「设置 → 模型」，在对应 Gemini 供应商卡片内勾选需要的增强项。',
+      routeStaleTag: '当前非 Gemini API 供应商',
+      loading: '正在加载设置…',
+      unavailable: '配置不可用。请确认组合包和插件行均已启用，然后重新打开此页。',
+      statusMatched: '提示词汉化已匹配',
+      statusLocalized: '提示词已汉化',
+      statusNativeHistory: '原生历史',
+      statusGoogleSearch: 'Google 搜索',
+      source: '来源：Gemini 增强插件',
       activityTitle: 'Google 搜索（Gemini）',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
@@ -70,225 +82,315 @@ window.__ModuleLoader__.load({
       activityQueries: '搜索词',
       activitySourceCount: '来源',
       activitySources: 'Google 返回的来源（在新标签页打开）',
-      searchUnavailable: '当前 Host 未提供此设置。',
-      showNotice: '显示系统提示词汉化状态',
-      noticeHelp: '切到匹配模型时显示匹配提示，确认请求使用汉化后显示已汉化。关闭此选项不影响汉化。',
-      matched: '已匹配系统提示词汉化规则',
-      localized: '系统提示词已汉化',
-      source: '来源：Gemini 增强插件',
-      help: '每行填写一个区分大小写的模型 ID，不要另加供应商 ID。例如，gemini-4-argon 只匹配一个 ID；gemini-4-* 按前缀匹配。* 只能放在末尾。保存空列表不会匹配任何模型。',
-      invalid: '每行填写一个模型 ID，或在非空前缀末尾加 *。规则内部不能有空白字符。',
-      loading: '正在加载模型 ID 规则…',
-      unavailable: '配置不可用。请确认组合包和插件行均已启用，然后重新打开此页。',
-      readOnly: '此配置为只读。',
-      save: '保存',
-      saving: '正在保存…',
-      saved: '设置已保存。',
-      refused: '设置未保存，草稿仍保留。',
-      failed: '未能确认保存结果，请先检查当前设置再重试。',
-      conflict: '设置已在别处更改。放弃草稿前，请先复制你想保留的编辑内容。',
-      reload: '放弃草稿并显示当前设置',
     }
 
     const secondary = { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: 1.5 }
-    const panel = { display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 680 }
-    const button = {
-      border: '1px solid var(--dsw-alias-border-selected)', borderRadius: 8,
-      padding: '6px 14px', font: 'inherit', cursor: 'pointer',
+    const caption = { margin: 0, color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, lineHeight: '18px' }
+    const warnCaption = { margin: 0, color: 'var(--dsw-alias-state-warn-label)', fontSize: 12, lineHeight: '18px' }
+    const errorCaption = { margin: 0, color: 'var(--dsw-alias-state-error-primary)', fontSize: 12, lineHeight: '18px' }
+    const secondaryButton = {
+      border: '0.5px solid var(--dsw-alias-border-l3)', borderRadius: 'var(--dsw-radius-md, 6px)',
+      padding: '3px 10px', font: 'inherit', fontSize: 12, lineHeight: '18px', cursor: 'pointer',
       background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-primary)',
     }
-    const primaryButton = {
-      ...button, background: 'var(--dsw-alias-button-primary-fill)',
-      color: 'var(--dsw-alias-label-primary-foreground)',
+    const cardSection = {
+      borderTop: '0.5px solid var(--dsw-alias-border-l3)',
+      paddingTop: 10,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }
+    const cardHeader = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+    }
+    const cardTitle = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      fontSize: 12,
+      lineHeight: '18px',
+      fontWeight: 500,
+      color: 'var(--dsw-alias-label-secondary)',
+    }
+    const toggleRow = {
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '8px 16px',
+    }
+    const checkboxLabel = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 13,
+      lineHeight: '20px',
+      color: 'var(--dsw-alias-label-primary)',
+      cursor: 'pointer',
+      userSelect: 'none',
+    }
+    const badgeStyle = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '1px 7px',
+      borderRadius: 'var(--dsw-radius-xs, 4px)',
+      border: '0.5px solid var(--dsw-alias-border-l3)',
+      fontSize: 11,
+      lineHeight: '16px',
+      color: 'var(--dsw-alias-label-secondary)',
     }
 
-    const routeModes = [
-      ['standard', 'routeNativeDefault'], ['off', 'routeNativeReplay'],
-      ['search-only', 'routeNativeSearchOnly'], ['mixed', 'routeNativeMixed'],
-    ]
-    const emptyRouteModes = Object.freeze({})
-    const modeOf = (modes, provider) => Object.hasOwn(modes, provider) ? modes[provider] : 'standard'
-
-    function eligibleProfiles(snapshot) {
-      if (snapshot.status !== 'ready') return new Map()
-      return new Map(Object.entries(snapshot.value?.providers ?? {}).filter(([provider, profile]) => {
-        if (!/^[a-z][a-z0-9-]*$/u.test(provider) || !profile || typeof profile !== 'object') return false
-        if (profile.api === 'google-generative-ai') {
-          return typeof profile.baseURL === 'string' && /^https?:\/\//iu.test(profile.baseURL)
-            && Array.isArray(profile.models) && profile.models.length > 0
-        }
-        return provider === 'google' && profile.api === undefined
-      }).map(([provider, profile]) => [provider, profile.displayName || provider]))
+    function routeEntryOf(routes, providerId) {
+      const entry = typeof providerId === 'string' && providerId.length > 0 && routes && Object.hasOwn(routes, providerId)
+        ? routes[providerId]
+        : undefined
+      return {
+        localizePrompt: entry?.localizePrompt === true,
+        nativeHistory: entry?.nativeHistory === true,
+        googleSearch: entry?.googleSearch === true,
+      }
     }
 
-    function ModelIdForm({ form, t, getModels, subscribeModels }) {
-      const id = React.useId()
-      const models = React.useSyncExternalStore(subscribeModels, getModels)
-      const [draft, setDraft] = React.useState(null)
-      const [feedback, setFeedback] = React.useState(null)
-      const active = React.useRef(false)
-      const saving = React.useRef(false)
+    function hasAnyEnhancement(entry) {
+      return entry.localizePrompt || entry.nativeHistory || entry.googleSearch
+    }
+
+    function isGeminiProfile(providerId, profile) {
+      if (typeof providerId !== 'string' || !providerId) return false
+      if (profile === undefined) return providerId === 'google'
+      if (!profile || typeof profile !== 'object') return false
+      if (profile.api === 'google-generative-ai') {
+        return typeof profile.baseURL === 'string' && /^https?:\/\//iu.test(profile.baseURL)
+          && Array.isArray(profile.models) && profile.models.length > 0
+      }
+      return providerId === 'google' && profile.api === undefined
+    }
+
+    // Same outline as the bundle icon, cropped for inline marks.
+    function GeminiMark({ label, size = 14 }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '6 6 24 24', fill: 'none',
+        stroke: 'currentColor', strokeWidth: 2.5, strokeLinejoin: 'round',
+        role: 'img', 'aria-label': label, focusable: 'false', style: { flexShrink: 0 },
+      }, label ? h('title', null, label) : null, h('path', {
+        d: 'M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z',
+      }))
+    }
+
+    function useFormMutator(form) {
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const active = React.useRef(true)
+      const busyRef = React.useRef(false)
       React.useEffect(() => {
         active.current = true
         return () => { active.current = false }
       }, [])
 
-      const state = form?.state
-      const accepted = state?.value?.modelIds
-      const revision = state?.revision
-      if (!Array.isArray(accepted) || typeof revision !== 'number') {
-        return h('p', { role: 'status', style: secondary }, t(state?.status === 'loading' ? 'loading' : 'unavailable'))
-      }
-      const baselineText = accepted.join('\n')
-      const text = draft?.text ?? baselineText
-      const baselineNotice = state.value.showLocalizationNotice === true
-      const showLocalizationNotice = draft?.showLocalizationNotice ?? baselineNotice
-      const hasSearchSetting = typeof state.value.enableGoogleSearch === 'boolean'
-      const baselineSearch = state.value.enableGoogleSearch === true
-      const enableGoogleSearch = draft?.enableGoogleSearch ?? baselineSearch
-      const rules = [...new Set(text.split('\n').map(line => line.trim()).filter(Boolean))]
-      const editedRules = text !== baselineText
-      const invalid = editedRules && rules.some(rule => !/^[^\s*]+\*?$/u.test(rule))
-      const rulesChanged = editedRules && (rules.length !== accepted.length || rules.some((rule, i) => rule !== accepted[i]))
-      const noticeChanged = showLocalizationNotice !== baselineNotice
-      const searchChanged = hasSearchSetting && enableGoogleSearch !== baselineSearch
-      const hasRouteSettings = typeof state.value.modelPageRoutes === 'object' && state.value.modelPageRoutes !== null
-      const baselineRoutes = hasRouteSettings ? state.value.modelPageRoutes : emptyRouteModes
-      const routeDraft = draft?.routes ?? emptyRouteModes
-      const candidates = eligibleProfiles(models)
-      const routes = new Set([...candidates.keys(), ...Object.keys(baselineRoutes).filter(route => baselineRoutes[route] !== 'standard'), ...Object.keys(routeDraft)])
-      const routeEdits = Object.entries(routeDraft).filter(([route, mode]) => mode !== modeOf(baselineRoutes, route))
-      const routeInvalid = routeEdits.some(([route, mode]) => mode !== 'standard' && !candidates.has(route))
-      const changed = rulesChanged || noticeChanged || searchChanged || routeEdits.length > 0
-      const conflict = draft !== null && draft.revision !== revision && changed
-      const busy = feedback?.kind === 'saving'
-      const writable = state.status === 'ready' && state.writable === true
-      const canSave = draft !== null && writable && changed && !invalid && !routeInvalid && !conflict && !busy
-
-      function edit(nextText, nextNotice, nextSearch, nextRoutes = routeDraft) {
-        const unchangedRoutes = Object.entries(nextRoutes).every(([route, mode]) => mode === modeOf(baselineRoutes, route))
-        setDraft(nextText === baselineText && nextNotice === baselineNotice && nextSearch === baselineSearch && unchangedRoutes ? null : {
-          text: nextText,
-          showLocalizationNotice: nextNotice,
-          enableGoogleSearch: nextSearch,
-          routes: nextRoutes,
-          revision: changed ? draft?.revision ?? revision : revision,
-        })
-        setFeedback(null)
-      }
-
-      async function save(event) {
-        event.preventDefault()
-        if (!canSave || saving.current) return
-        saving.current = true
-        setFeedback({ kind: 'saving' })
+      const run = React.useCallback(async (ops) => {
+        if (busyRef.current) return false
+        const current = form.getSnapshot ? form.getSnapshot() : form.state
+        if (!current || current.status !== 'ready' || current.writable !== true || typeof current.revision !== 'number') return false
+        busyRef.current = true
+        setBusy(true)
+        setError(null)
         try {
-          const ops = []
-          if (rulesChanged) ops.push({ op: 'set', path: ['modelIds'], value: rules })
-          if (noticeChanged) ops.push({ op: 'set', path: ['showLocalizationNotice'], value: showLocalizationNotice })
-          if (searchChanged) ops.push({ op: 'set', path: ['enableGoogleSearch'], value: enableGoogleSearch })
-          for (const [provider, mode] of routeEdits) ops.push({ op: 'set', path: ['modelPageRoutes', provider], value: mode })
-          const ok = await form.mutate(ops, draft.revision)
-          if (!active.current) return
-          if (ok) {
-            setDraft(null)
-            setFeedback({ kind: 'saved' })
-          } else setFeedback({ kind: 'refused' })
+          const ok = await form.mutate(ops, current.revision)
+          if (!active.current) return ok
+          if (!ok) setError('saveConflict')
+          return ok
         } catch {
-          if (active.current) setFeedback({ kind: 'failed' })
+          if (active.current) setError('saveFailed')
+          return false
         } finally {
-          saving.current = false
+          busyRef.current = false
+          if (active.current) setBusy(false)
         }
+      }, [form])
+
+      return { busy, error, run }
+    }
+
+    function ProviderCardEnhancements({ provider, configured, t, configForm, subscribeConfig, getConfig, subscribeModels, getModels }) {
+      const configSnap = React.useSyncExternalStore(subscribeConfig, getConfig)
+      const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
+      const { busy, error, run } = useFormMutator(configForm)
+
+      const providerId = provider?.provider
+      if (!providerId || configSnap.status !== 'ready') return null
+
+      const routes = configSnap.value?.routes
+      const current = routeEntryOf(routes, providerId)
+      const hasSaved = hasAnyEnhancement(current)
+      const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[providerId] : undefined
+      const eligible = modelsSnap.status === 'ready'
+        ? isGeminiProfile(providerId, profile)
+        : (providerId === 'google' || hasSaved)
+
+      if (!eligible && !hasSaved) return null
+      if (!configured && !hasSaved) return null
+
+      const writable = configSnap.writable === true
+      const disabled = !writable || busy
+
+      function updateRoute(next) {
+        const ops = hasAnyEnhancement(next)
+          ? [{ op: 'set', path: ['routes', providerId], value: next }]
+          : [{ op: 'unset', path: ['routes', providerId] }]
+        run(ops)
       }
 
-      const note = busy ? 'saving' : conflict ? 'conflict' : feedback?.kind ?? (!writable ? 'readOnly' : null)
-      const errorNote = note === 'conflict' || note === 'refused' || note === 'failed'
-      return h('form', { onSubmit: save, style: panel, 'aria-busy': busy },
-        h('label', { htmlFor: id, style: { fontWeight: 600 } }, t('title')),
-        h('p', { id: id + '-help', style: secondary }, t('help')),
-        h('textarea', {
-          id, value: text, rows: 5, spellCheck: false, autoCapitalize: 'off',
-          readOnly: !writable || busy, 'aria-invalid': invalid,
-          'aria-describedby': id + '-help' + (invalid ? ' ' + id + '-error' : ''),
-          style: {
-            boxSizing: 'border-box', width: '100%', padding: 10, resize: 'vertical',
-            border: '1px solid var(--dsw-alias-label-tertiary)', borderRadius: 8,
-            background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-primary)', font: 'inherit',
-          },
-          onChange: event => edit(event.target.value, showLocalizationNotice, enableGoogleSearch),
-        }),
-        invalid ? h('p', { id: id + '-error', role: 'alert', style: secondary }, t('invalid')) : null,
-        hasSearchSetting ? h(React.Fragment, null,
-          h('label', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-            h('input', {
-              type: 'checkbox', checked: enableGoogleSearch, disabled: !writable || busy,
-              'aria-describedby': id + '-search-help',
-              onChange: event => edit(text, showLocalizationNotice, event.target.checked),
-            }),
-            t('enableSearch'),
+      if (!eligible && hasSaved) {
+        return h('div', { style: cardSection },
+          h('div', { style: cardHeader },
+            h('span', { style: cardTitle }, h(GeminiMark, { label: t('brand'), size: 13 }), t('brand')),
+            h('button', {
+              type: 'button',
+              disabled,
+              style: { ...secondaryButton, opacity: disabled ? 0.6 : 1, cursor: disabled ? 'default' : 'pointer' },
+              onClick: () => run([{ op: 'unset', path: ['routes', providerId] }]),
+            }, t(busy ? 'clearing' : 'clear')),
           ),
-          h('p', { id: id + '-search-help', style: secondary }, t('searchHelp')),
-        ) : h('p', { style: secondary }, t('enableSearch'), ' — ', t('searchUnavailable')),
-        hasRouteSettings ? h('fieldset', { style: { border: 0, margin: '6px 0', padding: 0, display: 'grid', gap: 8 } },
-          h('legend', { style: { fontWeight: 600, padding: 0, marginBottom: 6 } }, t('routeNativeMode')),
-          h('p', { id: id + '-routes-help', style: secondary }, t('routeNativeHelp')),
-          models.status !== 'ready' || !routes.size ? h('p', { role: 'status', style: secondary },
-            t(models.status === 'loading' ? 'routeNativeLoading' : models.status === 'ready' ? 'routeNativeNone' : 'routeNativeUnreadable')) : null,
-          routeInvalid ? h('p', { role: 'alert', style: secondary }, t('routeNativeDraftUnavailable')) : null,
-          [...routes].map((route, index) => {
-            const candidate = candidates.get(route)
-            const label = candidate && candidate !== route ? `${candidate} (${route})` : route
-            const control = `${id}-route-${index}`
-            const unavailable = candidate === undefined
-            const mismatched = unavailable && models.status === 'ready'
-            const mode = Object.hasOwn(routeDraft, route) ? routeDraft[route] : modeOf(baselineRoutes, route)
-            return h('div', { key: route, style: { display: 'grid', gap: 4 } },
-              h('label', { htmlFor: control, style: { overflowWrap: 'anywhere' } }, label),
-              h('select', {
-                id: control, value: mode, disabled: !writable || busy,
-                'aria-describedby': id + '-routes-help' + (mismatched ? ` ${control}-status` : ''),
-                style: { ...button, maxWidth: '100%', width: 'fit-content' },
-                onChange: event => edit(text, showLocalizationNotice, enableGoogleSearch, { ...routeDraft, [route]: event.target.value }),
-              }, routeModes.map(([value, key]) => h('option', { key: value, value, disabled: unavailable && value !== 'standard' }, t(key)))),
-              mismatched ? h('p', { id: control + '-status', style: secondary }, t('routeNativeUnavailable')) : null,
-            )
-          }),
-        ) : null,
-        h('label', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('p', { style: caption }, t('nonGeminiRoute')),
+          error ? h('p', { role: 'alert', style: errorCaption }, t(error)) : null,
+        )
+      }
+
+      const items = [
+        ['localizePrompt', t('localizePrompt'), t('localizePromptTitle')],
+        ['nativeHistory', t('nativeHistory'), t('nativeHistoryTitle')],
+        ['googleSearch', t('googleSearch'), t('googleSearchTitle')],
+      ]
+
+      return h('div', { style: cardSection },
+        h('div', { style: cardHeader },
+          h('span', { style: cardTitle }, h(GeminiMark, { label: t('brand'), size: 13 }), t('brand')),
+          busy
+            ? h('span', { role: 'status', style: caption }, t('saving'))
+            : !writable ? h('span', { style: caption }, t('readOnly')) : null,
+        ),
+        h('div', { style: toggleRow }, items.map(([field, label, title]) =>
+          h('label', {
+            key: field,
+            title,
+            style: { ...checkboxLabel, opacity: disabled ? 0.65 : 1, cursor: disabled ? 'default' : 'pointer' },
+          },
           h('input', {
-            type: 'checkbox', checked: showLocalizationNotice, disabled: !writable || busy,
-            'aria-describedby': id + '-notice-help',
-            onChange: event => edit(text, event.target.checked, enableGoogleSearch),
+            type: 'checkbox',
+            checked: current[field],
+            disabled,
+            onChange: event => {
+              const checked = event.target.checked
+              const next = { ...current, [field]: checked }
+              // Enabling Google Search alongside local tools relies on native history for reliable follow-up turns.
+              if (field === 'googleSearch' && checked && !next.nativeHistory) next.nativeHistory = true
+              updateRoute(next)
+            },
           }),
-          t('showNotice'),
-        ),
-        h('p', { id: id + '-notice-help', style: secondary }, t('noticeHelp')),
-        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
-          h('button', { type: 'submit', disabled: !canSave, style: canSave ? primaryButton : { ...button, opacity: 0.6, cursor: 'default' } }, t('save')),
-          (conflict || routeInvalid) && !busy ? h('button', { type: 'button', style: button, onClick() { setDraft(null); setFeedback(null) } }, t('reload')) : null,
-        ),
-        h('p', { role: 'status', style: errorNote ? { ...secondary, color: 'var(--dsw-alias-state-error-primary)' } : secondary }, note ? t(note) : null),
+          h('span', null, label)))),
+        current.googleSearch && !current.nativeHistory
+          ? h('p', { role: 'status', style: warnCaption }, t('searchWithoutHistoryWarn'))
+          : null,
+        error ? h('p', { role: 'alert', style: errorCaption }, t(error)) : null,
       )
     }
 
-    function matchesModelId(model, rules) {
-      return typeof model === 'string' && model.length !== 0 && Array.isArray(rules)
-        && rules.some(rule => typeof rule === 'string' && (rule.endsWith('*')
-          ? model.startsWith(rule.slice(0, -1)) : model === rule))
+    function PluginSettingsPage({ form, t, subscribeModels, getModels }) {
+      const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
+      const { busy, error, run } = useFormMutator(form)
+      const state = form?.state
+
+      if (!state || state.status === 'loading') {
+        return h('p', { role: 'status', style: secondary }, t('loading'))
+      }
+      if (state.status !== 'ready' || typeof state.revision !== 'number') {
+        return h('p', { role: 'status', style: secondary }, t('unavailable'))
+      }
+
+      const writable = state.writable === true
+      const disabled = !writable || busy
+      const showStatusNotice = state.value?.showStatusNotice === true
+      const routes = state.value?.routes && typeof state.value.routes === 'object' ? state.value.routes : {}
+      const activeEntries = Object.entries(routes)
+        .map(([providerId, raw]) => [providerId, routeEntryOf({ [providerId]: raw }, providerId)])
+        .filter(([, entry]) => hasAnyEnhancement(entry))
+      const providers = modelsSnap.status === 'ready' ? (modelsSnap.value?.providers ?? {}) : null
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 } },
+        h('div', {
+          style: {
+            border: '0.5px solid var(--dsw-alias-border-l3)',
+            borderRadius: 'var(--dsw-radius-xl, 12px)',
+            padding: '12px 14px',
+            background: 'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-base))',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          },
+        },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, fontWeight: 500, fontSize: 14 } },
+          h(GeminiMark, { label: t('brand'), size: 15 }),
+          h('span', null, t('activeRoutesHeading'))),
+        h('p', { style: secondary }, t('pageIntro')),
+        activeEntries.length === 0
+          ? h('p', { style: caption }, t('activeRoutesEmpty'))
+          : h('ul', { style: { listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 } },
+            activeEntries.map(([providerId, entry]) => {
+              const profile = providers?.[providerId]
+              const displayName = profile?.displayName && profile.displayName !== providerId
+                ? `${profile.displayName} (${providerId})`
+                : providerId
+              const stale = providers !== null && !isGeminiProfile(providerId, profile)
+              const tags = [
+                entry.localizePrompt && t('localizePrompt'),
+                entry.nativeHistory && t('nativeHistory'),
+                entry.googleSearch && t('googleSearch'),
+              ].filter(Boolean)
+              return h('li', {
+                key: providerId,
+                style: {
+                  borderTop: '0.5px solid var(--dsw-alias-border-l3)',
+                  paddingTop: 8,
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                },
+              },
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 } },
+                  h('span', { style: { fontSize: 13, fontWeight: 500, overflowWrap: 'anywhere' } }, displayName),
+                  stale ? h('span', { style: { ...badgeStyle, color: 'var(--dsw-alias-state-warn-label)' } }, t('routeStaleTag')) : null),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+                  tags.map(tag => h('span', { key: tag, style: badgeStyle }, tag)))),
+              stale ? h('button', {
+                type: 'button',
+                disabled,
+                style: { ...secondaryButton, opacity: disabled ? 0.6 : 1, cursor: disabled ? 'default' : 'pointer' },
+                onClick: () => run([{ op: 'unset', path: ['routes', providerId] }]),
+              }, t(busy ? 'clearing' : 'clear')) : null)
+            }))),
+
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          h('label', { style: { ...checkboxLabel, opacity: disabled ? 0.65 : 1, cursor: disabled ? 'default' : 'pointer' } },
+            h('input', {
+              type: 'checkbox',
+              checked: showStatusNotice,
+              disabled,
+              onChange: event => run([{ op: 'set', path: ['showStatusNotice'], value: event.target.checked }]),
+            }),
+            h('span', { style: { fontWeight: 500 } }, t('showStatusNotice'))),
+          h('p', { style: secondary }, t('showStatusNoticeHelp')),
+          busy ? h('p', { role: 'status', style: caption }, t('saving'))
+            : !writable ? h('p', { role: 'status', style: caption }, t('readOnly')) : null,
+          error ? h('p', { role: 'alert', style: errorCaption }, t(error)) : null),
+      )
     }
 
-    // Same outline as the bundle icon, cropped for the small composer seat.
-    function GeminiMark({ label }) {
-      return h('svg', {
-        width: 14, height: 14, viewBox: '6 6 24 24', fill: 'none',
-        stroke: 'currentColor', strokeWidth: 2.5, strokeLinejoin: 'round',
-        role: 'img', 'aria-label': label, focusable: 'false', style: { flexShrink: 0 },
-      }, h('title', null, label), h('path', {
-        d: 'M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z',
-      }))
-    }
-
-    function LocalizationNoticeStream({ sessionId, model, t }) {
+    function LocalizationConfirmation({ sessionId, provider, labels, t }) {
       const [localized, setLocalized] = React.useState(false)
       React.useEffect(() => {
         let stream
@@ -301,7 +403,7 @@ window.__ModuleLoader__.load({
           return // The match notice stays available without a live connection.
         }
         stream.onmessage = ({ data }) => {
-          try { setLocalized(JSON.parse(data) === model) }
+          try { setLocalized(JSON.parse(data) === provider) }
           catch { setLocalized(false) }
         }
         stream.onerror = () => setLocalized(false)
@@ -309,12 +411,13 @@ window.__ModuleLoader__.load({
           stream.onmessage = stream.onerror = null
           stream.close()
         }
-      }, [sessionId, model])
+      }, [sessionId, provider])
 
+      const summary = [t(localized ? 'statusLocalized' : 'statusMatched'), ...labels].join(' · ')
       return h('span', {
         role: 'status',
         style: { ...secondary, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, textAlign: 'center' },
-      }, h(GeminiMark, { label: t('source') }), h('span', null, t(localized ? 'localized' : 'matched')))
+      }, h(GeminiMark, { label: t('source') }), h('span', null, summary))
     }
 
     const noSearchCards = []
@@ -339,6 +442,7 @@ window.__ModuleLoader__.load({
       }
       return { running, turns }
     }
+
     const activityCardStyle = {
       margin: '4px 0', padding: '6px 10px', borderRadius: 8,
       border: '1px solid var(--dsw-alias-label-tertiary)', color: 'var(--dsw-alias-label-primary)',
@@ -463,29 +567,56 @@ window.__ModuleLoader__.load({
         }
 
         function TurnSearchCards({ sessionId, turn, t, useProjection }) {
-          const durable = useProjection('geminiNativeSearchActivity', value => value?.[turn.turn] ?? noSearchCards)
-          const temporary = useSearchActivity(sessionId, turn)
-          const cards = durable.length ? [...durable, ...temporary] : temporary
+          const turnNumber = typeof turn === 'number' ? turn : turn?.turn
+          const durable = useProjection('geminiNativeSearchActivity', value => value?.[turnNumber] ?? noSearchCards)
+          const temporary = useSearchActivity(sessionId, turnNumber)
+          const cards = durable.length ? durable : temporary
           return cards.length ? h(GoogleSearchCard, { cards, t }) : null
         }
 
-        function LocalizationNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
+        function EnhancementNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
           const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
-          const selectedModel = useProjection('modelSelection', selection => selection?.next?.model)
+          const selectedProvider = useProjection('modelSelection', selection => selection?.next?.provider)
           const modelState = React.useSyncExternalStore(modelStore.subscribe, modelStore.getSnapshot)
           // The projection has no saved choice in a new chat using the profile
           // default. Use the same directory as the picker for that fallback.
-          const model = selectedModel ?? modelState?.current?.model
-          if (snapshot.status !== 'ready' || snapshot.value?.showLocalizationNotice !== true
-            || !sessionId || !matchesModelId(model, snapshot.value?.modelIds)) return null
-          // A new session/model must not paint the previous stream's evidence.
-          return h(LocalizationNoticeStream, { key: JSON.stringify([sessionId, model]), sessionId, model, t })
+          const provider = selectedProvider ?? modelState?.current?.provider
+          if (snapshot.status !== 'ready' || snapshot.value?.showStatusNotice !== true || !sessionId || !provider) return null
+          const routeCfg = routeEntryOf(snapshot.value?.routes, provider)
+          if (!hasAnyEnhancement(routeCfg)) return null
+          const extraLabels = [
+            routeCfg.nativeHistory && t('statusNativeHistory'),
+            routeCfg.googleSearch && t('statusGoogleSearch'),
+          ].filter(Boolean)
+          if (routeCfg.localizePrompt) {
+            return h(LocalizationConfirmation, {
+              key: JSON.stringify([sessionId, provider]),
+              sessionId,
+              provider,
+              labels: extraLabels,
+              t,
+            })
+          }
+          return h('span', {
+            role: 'status',
+            style: { ...secondary, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, textAlign: 'center' },
+          }, h(GeminiMark, { label: t('source') }), h('span', null, extraLabels.join(' · ')))
         }
 
         ctx.effect(() => ctx.locale.register(namespace, { en, zh }))
+        ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
+          name: 'settings.models.provider-card', key: 'llm-pi-ai', locale: namespace,
+        }, props => h(ProviderCardEnhancements, {
+          ...props,
+          configForm: config,
+          subscribeConfig: subscribe,
+          getConfig: getSnapshot,
+          subscribeModels,
+          getModels,
+        })))
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config', key: `${pluginId}#${pluginId}`, locale: namespace,
-        }, ({ view, form, t }) => view === 'page' ? h(ModelIdForm, { form, t, getModels, subscribeModels }) : null))
+        }, ({ view, form, t }) => view === 'page' ? h(PluginSettingsPage, { form, t, subscribeModels, getModels }) : null))
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
           name: 'conversation.composer.dock', id: `${pluginId}-search-live`, order: 3, locale: namespace,
         }, LiveSearchActivity))
@@ -501,7 +632,7 @@ window.__ModuleLoader__.load({
               try { return { modelStore: models.directoryFor(sessionId).store } }
               catch { return {} }
             },
-          }, LocalizationNotice))
+          }, EnhancementNotice))
         })
       },
     }

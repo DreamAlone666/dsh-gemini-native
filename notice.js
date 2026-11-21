@@ -36,43 +36,43 @@ function effectivePrompt(messages) {
   }
 }
 
-export function localizationNotice(ctx, config, matchesModelId) {
+export function localizationNotice(ctx, config, routeConfigOf) {
   const candidates = new WeakMap()
   const recent = new Map()
   const subscribers = new Set()
   const encoder = new TextEncoder()
 
-  function publish(sessionId, model) {
-    if ((recent.get(sessionId) ?? null) === model) return
+  function publish(sessionId, provider) {
+    if ((recent.get(sessionId) ?? null) === provider) return
     recent.delete(sessionId)
-    if (model !== null) {
-      recent.set(sessionId, model)
+    if (provider !== null) {
+      recent.set(sessionId, provider)
       if (recent.size > recentLimit) {
         const evicted = recent.keys().next().value
         recent.delete(evicted)
         for (const sub of subscribers) if (sub.sessionId === evicted) sub.update(null)
       }
     }
-    for (const sub of subscribers) if (sub.sessionId === sessionId) sub.update(model)
+    for (const sub of subscribers) if (sub.sessionId === sessionId) sub.update(provider)
   }
 
   ctx.on('llm/stream', (options, next) => {
     const stream = next()
     const candidate = candidates.get(options.signal)
-    if (!candidate || options.signal.aborted || candidate.sessionId !== options.sessionId || candidate.model !== options.model) return stream
-    const confirmed = config.showLocalizationNotice.get() && candidate.prompt !== undefined
-      && matchesModelId(options.model, config.modelIds.get())
+    if (!candidate || options.signal.aborted || candidate.sessionId !== options.sessionId || candidate.provider !== options.provider) return stream
+    const confirmed = config.showStatusNotice.get() && candidate.prompt !== undefined
+      && routeConfigOf(config.routes.get(), options.provider).localizePrompt
       && effectivePrompt(options.messages) === candidate.prompt
-    publish(candidate.sessionId, confirmed ? candidate.model : null)
+    publish(candidate.sessionId, confirmed ? candidate.provider : null)
     return stream
   })
 
   function watch(request) {
     const sessionId = new URL(request.url).searchParams.get('sessionId')
     if (!sessionId || sessionId.length > 256) return new Response(null, { status: 400 })
-    if (!config.showLocalizationNotice.get() || request.signal.aborted) return new Response(null, { status: 204 })
+    if (!config.showStatusNotice.get() || request.signal.aborted) return new Response(null, { status: 204 })
     let pending = recent.get(sessionId) ?? null
-    if (!matchesModelId(pending, config.modelIds.get())) pending = null
+    if (pending !== null && !routeConfigOf(config.routes.get(), pending).localizePrompt) pending = null
     let sent
     let controller
     const cleanup = () => {
@@ -88,7 +88,7 @@ export function localizationNotice(ctx, config, matchesModelId) {
       sent = pending
       controller.enqueue(encoder.encode(`data: ${JSON.stringify(sent)}\n\n`))
     }
-    const sub = { sessionId, close, update(model) { pending = model; flush() } }
+    const sub = { sessionId, close, update(provider) { pending = provider; flush() } }
     return new Response(new ReadableStream({
       start(stream) {
         controller = stream
@@ -102,7 +102,7 @@ export function localizationNotice(ctx, config, matchesModelId) {
   }
 
   // The shared /api carrier authenticates requests and admits only owner peers
-  // to exact Fetch routes. No prompt text or provider information crosses it.
+  // to exact Fetch routes. No prompt text or credentials cross it.
   ctx.connection.fetch.register({ path: statusPath, methods: ['GET'], requestBody: 'buffered', fetch: watch })
   ctx.effect(() => () => {
     for (const sub of subscribers) sub.close()
@@ -110,12 +110,12 @@ export function localizationNotice(ctx, config, matchesModelId) {
   })
 
   return {
-    remember(context, model, localized) {
+    remember(context, provider, localized) {
       const sessionId = context?.agent?.id
       const signal = context?.signal
-      if (!sessionId || !signal || typeof model !== 'string') return
-      const prompt = localized && config.showLocalizationNotice.get() ? expectedPrompt(localized) : undefined
-      candidates.set(signal, { sessionId, model, prompt })
+      if (!sessionId || !signal || typeof provider !== 'string' || provider.length === 0) return
+      const prompt = localized && config.showStatusNotice.get() ? expectedPrompt(localized) : undefined
+      candidates.set(signal, { sessionId, provider, prompt })
     },
   }
 }

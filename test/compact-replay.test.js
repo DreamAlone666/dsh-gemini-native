@@ -6,7 +6,7 @@ import {
 } from '../generate-content.js'
 import { nativeSearchProjection } from '../native-search-projection.js'
 
-const route = { identity: 'example-route', search: 'mixed' }
+const route = { identity: 'example-route', googleSearch: true }
 const model = 'gemini-test'
 const localId = 'local-read-1'
 const blocks = [

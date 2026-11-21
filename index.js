@@ -1,28 +1,40 @@
 import Schema from '@deepseek-ai/schemastery'
 import { toolPrompts } from './tool-prompts.js'
 import { localizationNotice } from './notice.js'
-import { googleSearch } from './google-search.js'
+import { geminiTransport } from './gemini-transport.js'
 import { googleSearchActivity } from './google-search-activity.js'
 import { hasNativeReplay } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
 
 export const inject = ['systemPrompt']
 
-const defaultModelIds = ['gemini-4', 'gemini-4-*', 'gemini-4.*']
+export const RouteConfig = Schema.object({
+  localizePrompt: Schema.boolean().default(false)
+    .description('Localize known DSH system prompts into Simplified Chinese on this Gemini provider.'),
+  nativeHistory: Schema.boolean().default(false)
+    .description('Preserve and replay Gemini native parts (signatures, server-side tool parts, opaque fields) on this route.'),
+  googleSearch: Schema.boolean().default(false)
+    .description('Replace DSH web_search with native Google Search alongside local functions on this Gemini route.'),
+})
 
 export const Config = Schema.object({
   // The DSH Settings service only exposes volatile fields to Web forms.
-  modelPageRoutes: Schema.dict(Schema.union(['standard', 'off', 'search-only', 'mixed'])).default({})
-    .description('Experimental native parts replay and Google Search mode for Gemini API routes served by llm-pi-ai.').volatile(),
-  modelIds: Schema.array(Schema.string().required().pattern(/^[^\s*]+\*?$/u))
-    .default(defaultModelIds)
-    .description('Model IDs to localize and, if enabled on a Gemini route, ground with Google Search. Use an exact ID or a trailing *.')
-    .volatile(),
-  enableGoogleSearch: Schema.boolean().default(false)
-    .description('Enable experimental native Google Search in matching Gemini conversation requests.').volatile(),
-  showLocalizationNotice: Schema.boolean().default(false)
-    .description('Show a composer notice only for confirmed system prompt localization.').volatile(),
+  routes: Schema.dict(RouteConfig).default({})
+    .description('Per-provider Gemini enhancements configured on Gemini API routes.').volatile(),
+  showStatusNotice: Schema.boolean().default(false)
+    .description('Show a subtle composer notice for active Gemini enhancements.').volatile(),
 })
+
+export function routeConfigOf(routes, provider) {
+  const entry = typeof provider === 'string' && provider.length > 0 && routes && Object.hasOwn(routes, provider)
+    ? routes[provider]
+    : undefined
+  return {
+    localizePrompt: entry?.localizePrompt === true,
+    nativeHistory: entry?.nativeHistory === true,
+    googleSearch: entry?.googleSearch === true,
+  }
+}
 
 const codingPersona = 'You are a coding agent powered by the {{model}} model.'
 const codingPersonaZh = '你是由 {{model}} 模型驱动的编程智能体。'
@@ -47,12 +59,6 @@ const translations = new Map(Object.entries({
   ...toolPrompts,
 }).map(([name, variants]) => [name, new Map(variants)]))
 
-function matchesModelId(modelId, rules) {
-  return typeof modelId === 'string' && modelId.length !== 0 && rules.some(rule => rule.endsWith('*')
-    ? modelId.startsWith(rule.slice(0, -1))
-    : modelId === rule)
-}
-
 function localizeSections(presentation) {
   let changed = false
   const sections = presentation.sections.map(section => {
@@ -67,7 +73,7 @@ function localizeSections(presentation) {
 export function apply(ctx, config) {
   let observerFor
   let notice
-  const reportFor = sessionId => observerFor?.reportFor(sessionId, true)
+  const reportFor = (sessionId, liveOnly = false) => observerFor?.reportFor(sessionId, liveOnly)
   ctx.inject?.(['sessionProjections'], child => {
     child.effect(async () => {
       const handle = await child.sessionProjections.register(nativeSearchProjection)
@@ -86,20 +92,19 @@ export function apply(ctx, config) {
       return native
     })
   })
-  ctx.inject?.(['llm', 'loader'], child => googleSearch(child, config, matchesModelId, id => observerFor?.(id), reportFor))
+  ctx.inject?.(['llm', 'loader'], child => geminiTransport(child, config, routeConfigOf, reportFor))
   ctx.inject?.(['connection'], (child) => {
-    notice = localizationNotice(child, config, matchesModelId)
+    notice = localizationNotice(child, config, routeConfigOf)
     observerFor = googleSearchActivity(child)
     child.effect(() => () => { notice = undefined; observerFor = undefined })
   })
   ctx.on('system-prompt/assemble', async (_presentation, context, next) => {
-    // Read the same captured selection the agent loop uses for this step. Do not
-    // infer a model from the provider, display name, agent defaults or variables.
-    const model = context?.modelSelection?.model
-    const matches = matchesModelId(model, config.modelIds.get())
+    // Scope prompt localization to the exact Gemini provider selected for this step.
+    const provider = context?.modelSelection?.provider
+    const enabled = routeConfigOf(config.routes.get(), provider).localizePrompt
     const presentation = await next()
-    const localized = matches ? localizeSections(presentation) : presentation
-    notice?.remember(context, model, localized === presentation ? undefined : localized)
+    const localized = enabled ? localizeSections(presentation) : presentation
+    notice?.remember(context, provider, localized === presentation ? undefined : localized)
     return localized
   })
 }

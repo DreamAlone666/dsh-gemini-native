@@ -1,8 +1,8 @@
 {
   "name": "dsh-gemini-enhancement",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
-  "description": "Localize known DeepSeek Harness system prompts and optionally add native Google Search to Gemini requests.",
+  "description": "Per-provider Gemini API enhancements for DeepSeek Harness: Simplified Chinese system prompt localization, native history replay, and native Google Search.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -21,7 +21,7 @@
     "client.js",
     "tool-prompts.js",
     "notice.js",
-    "google-search.js",
+    "gemini-transport.js",
     "google-search-activity.js",
     "google-search-sse.js",
     "generate-content.js",
@@ -47,7 +47,8 @@
         "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-model-selection",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-models"
       ]
     }
   }

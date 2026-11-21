@@ -23,7 +23,7 @@ export function normalizeEndpoint(value) {
 
 export function routeIdentity(route) {
   return createHash('sha256').update(JSON.stringify([
-    generateContentApi, route.baseURL, route.provider ?? '', route.search,
+    generateContentApi, route.baseURL, route.provider ?? '', Boolean(route.googleSearch),
   ])).digest('hex')
 }
 
@@ -347,11 +347,13 @@ function withoutDshWebSearch(tools) {
 }
 
 /**
- * Apply Google Search tool augmentation to a pi-ai-generated Gemini request body.
- * mode: 'off' | 'search-only' | 'mixed'
+ * Apply native Google Search tool augmentation to a pi-ai-generated Gemini request body.
+ * Always replaces DSH `web_search` with `{ googleSearch: {} }` while preserving
+ * all other local functions (mixed mode).
  */
-export function applyGoogleSearchTools(body, mode, requiresCirculation = false) {
-  if (mode === 'off' && !requiresCirculation) return { body, changed: false }
+export function applyGoogleSearchTools(body, enableSearch, requiresCirculation = false) {
+  const wantsSearch = enableSearch === true
+  if (!wantsSearch && !requiresCirculation) return { body, changed: false }
   const originalTools = body.tools ?? []
   const hasSearch = originalTools.some(tool => !isObject(tool)
     || Object.hasOwn(tool, 'googleSearch') || Object.hasOwn(tool, 'google_search')
@@ -359,12 +361,10 @@ export function applyGoogleSearchTools(body, mode, requiresCirculation = false) 
   const next = { ...body }
   let changed = false
 
-  if (mode !== 'off' && !hasSearch) {
+  if (wantsSearch && !hasSearch) {
     const tools = withoutDshWebSearch(originalTools)
     const remainingFunctions = tools.some(hasFunctions)
-    if (mode === 'search-only' && remainingFunctions) {
-      // search-only mode never mixes Google Search with other local functions.
-    } else if (originalTools.some(hasFunctions)) {
+    if (originalTools.some(hasFunctions)) {
       // Google requires this opt-in when mixing built-ins with functions.
       // Its examples omit the mode; AUTO is not supported. Never override a
       // mode or an explicit false chosen by a different integration.
@@ -428,7 +428,7 @@ function findNativeAssistant(assistants, startIndex, request, route, prefix, wir
  *    tool calls/responses, opaque fields) and align following functionResponse IDs.
  * 2. Compute the canonical prefix fingerprint of the patched contents for the
  *    upcoming response's replayState.
- * 3. Apply the route's Google Search tool mode (off / search-only / mixed).
+ * 3. Apply native Google Search augmentation when `route.googleSearch` is enabled.
  */
 export function patchGenerateContentBody(body, request, route) {
   if (!isObject(body) || !Array.isArray(body.contents)
@@ -438,7 +438,7 @@ export function patchGenerateContentBody(body, request, route) {
     : typeof body.systemInstruction === 'string' ? [{ text: body.systemInstruction }] : []
   const assistants = Array.isArray(request.messages)
     ? request.messages.filter(message => message.role === 'assistant') : []
-  const allowCirculation = route.search === 'mixed'
+  const allowCirculation = route.googleSearch === true
     && !(isObject(body.toolConfig) && body.toolConfig.includeServerSideToolInvocations === false)
 
   let assistantCursor = 0
@@ -509,7 +509,7 @@ export function patchGenerateContentBody(body, request, route) {
 
   const nextPrefix = historyFingerprint(patchedContents, systemParts)
   const contentBody = contentsChanged ? { ...body, contents: patchedContents } : body
-  const tools = applyGoogleSearchTools(contentBody, route.search, requiresCirculation)
+  const tools = applyGoogleSearchTools(contentBody, route.googleSearch === true, requiresCirculation)
   return {
     body: tools.body,
     changed: contentsChanged || tools.changed,

@@ -125,7 +125,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       return { ctx, privacy }
     }
 
-    const { ctx, privacy } = await boot({ modelPageRoutes: { native: 'mixed' } })
+    const { ctx, privacy } = await boot({ routes: { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } } })
     let calls = 0
     ctx.tools.register({
       name: 'read_mock', description: 'read_mock', parameters: { type: 'object' },

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Gemini 增强",
-    "description": "Localizes known DSH system prompts into Simplified Chinese according to model ID rules. Optionally show a localization notice or replace DSH web search with experimental native Google Search in matching Gemini API conversation requests. Both options are off by default. The plugin does not change routing or make extra model calls."
+    "title": "Gemini Enhancement",
+    "description": "Configure per-provider enhancements directly inside each Gemini API provider card under Settings → Models: Simplified Chinese system prompt localization, Gemini native history replay, and native Google Search (replacing built-in web_search). All options are off by default; routing and extra model calls are untouched."
   }
 }
