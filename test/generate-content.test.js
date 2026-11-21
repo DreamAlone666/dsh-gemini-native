@@ -434,7 +434,7 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
     assert.equal(crossReq.body.tools.some(tool => Object.hasOwn(tool, 'googleSearch')), false)
     assert.deepEqual(
       crossReq.body.tools.flatMap(tool => tool.functionDeclarations?.map(fn => fn.name) ?? []),
-      ['read_mock', 'web_search'],
+      ['read_mock'],
     )
     assert.equal(crossReq.body.toolConfig?.includeServerSideToolInvocations, undefined)
     assert.equal(crossReq.body.contents[1].parts.some(part => Object.hasOwn(part, 'toolCall')), false)

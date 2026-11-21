@@ -11,7 +11,7 @@
 3. 打开 **设置 → 模型**，添加或展开任意 **Gemini API** 供应商（支持自定义 `google-generative-ai` 中转及内置 `google` 路由），在卡片底部的 **Gemini 增强** 区域直接勾选需要的能力（即时保存，对下一次请求生效）：
    - **系统提示词汉化**：将已知的 DSH 内置英文系统提示词段落替换为简体中文（防止 Gemini 4 系列降智）。
    - **原生历史回放**：在内置 `pi-ai` Adapter 之上增量留存并回放 Gemini 原生 `parts`（包含思维签名、`toolCall`/`toolResponse` 和未知字段），对齐紧随其后的 `functionResponse.id`。
-   - **Google 原生搜索**：保留其余本地工具的同时，将内置 `web_search` 替换为 Gemini 原生 `googleSearch` 并设置 `includeServerSideToolInvocations: true`。首次勾选时会自动联动开启 **原生历史回放**（避免混用本地工具后续轮失败），你仍可按需手动关闭。
+   - **Google 原生搜索**：在智能体工具作用域层限制内置 `web_search`（覆盖 PTC 模式的 `tools:sdk` 声明与 `run_code` 运行时绑定，以及 Native 模式的 `tool:web_search` 提示词），保留其余本地工具的同时将其替换为 Gemini 原生 `googleSearch` 并设置 `includeServerSideToolInvocations: true`。首次勾选时会自动联动开启 **原生历史回放**（避免混用本地工具后续轮失败），你仍可按需手动关闭。
 
 ## 工作机制与边界
 
