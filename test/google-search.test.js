@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
 import { geminiTransport } from '../gemini-transport.js'
+import { attachNativeReplay, historyFingerprint, makeNativeReplayData, normalizeEndpoint, routeIdentity } from '../generate-content.js'
 import { searchActivityPath } from '../google-search-activity.js'
 
 const model = 'gemini-4-hydrogen'
@@ -143,6 +144,146 @@ test('disposal leaves a later fetch wrapper installed and disables the inner wra
   f.cleanup()
   assert.equal(globalThis.fetch, later)
   await f.run({ intact: true })
+})
+
+test('geminiTransport performs read-only prefix alignment for same-route compaction without recording, reporting, or XHigh', async t => {
+  const handlers = new Map()
+  const original = globalThis.fetch
+  const sentinelResponse = Symbol('raw-compaction-response')
+  const calls = []
+  const reports = []
+  let routes = { mock: { localizePrompt: false, nativeHistory: true, googleSearch: true } }
+  let sessionsService = null
+  const offlineFetch = (input, init) => { calls.push({ input, init }); return sentinelResponse }
+  globalThis.fetch = offlineFetch
+  t.after(() => { globalThis.fetch = original })
+
+  let cleanup
+  geminiTransport({
+    get: name => name === 'sessions' ? sessionsService : undefined,
+    loader: { resolve: () => ({ moduleNamespace: { isAgentLoopRequest: request => request.agent === true } }) },
+    logger: { warn() {} },
+    on: (event, fn) => handlers.set(event, fn),
+    effect: start => { cleanup = start() },
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, (sessionId, liveOnly) => {
+    reports.push({ sessionId, liveOnly })
+    return () => {}
+  }, sessionId => sessionId === 'sess-1')
+  t.after(() => cleanup?.())
+
+  const normalizedURL = normalizeEndpoint(baseURL)
+  const route = { baseURL: normalizedURL, provider: 'mock', googleSearch: true }
+  route.identity = routeIdentity(route)
+  const localId = 'local-read-1'
+  const nativeParts = [
+    { thought: true, text: 'checking', thoughtSignature: 'sig-1' },
+    { toolCall: { id: 'g-1', toolType: 'GOOGLE_SEARCH_WEB', args: { queries: ['dsh'] } }, thoughtSignature: 'sig-2' },
+    { toolResponse: { id: 'g-1', toolType: 'GOOGLE_SEARCH_WEB', response: { sources: [{ uri: 'https://example.org', title: 'Ex' }] } }, thoughtSignature: 'sig-3' },
+    { functionCall: { id: 'wire-read-1', name: 'read_mock', args: { path: 'a.txt' } }, thoughtSignature: 'sig-4' },
+  ]
+  const nativeBlocks = [
+    { type: 'reasoning', text: 'checking' },
+    { type: 'tool-call', id: localId, name: 'read_mock', arguments: JSON.stringify({ path: 'a.txt' }) },
+  ]
+  const prefix = historyFingerprint([{ role: 'user', parts: [{ text: 'hello' }] }])
+  const nativeData = makeNativeReplayData(
+    route, model, [[{ index: 0, content: { role: 'model', parts: nativeParts }, finishReason: 'STOP' }]],
+    [localId], 'complete', prefix, nativeBlocks,
+  )
+  const replayState = attachNativeReplay(
+    { response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'mock', model, stopReason: 'toolUse' }, blocks: [] },
+    nativeData,
+  )
+  const historyMessages = [
+    { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    { role: 'assistant', content: nativeBlocks, source: { kind: 'model', provider: 'mock', model, replayState } },
+    { role: 'tool', toolCallId: localId, content: [{ type: 'text', text: 'done' }] },
+  ]
+  const wireHistory = [
+    { role: 'user', parts: [{ text: 'hello' }] },
+    { role: 'model', parts: [{ thought: true, text: 'checking' }, { functionCall: { id: localId, name: 'read_mock', args: { path: 'a.txt' } } }] },
+    { role: 'user', parts: [{ functionResponse: { id: localId, name: 'read_mock', response: { output: 'done' } } }] },
+  ]
+  const compactionBody = {
+    contents: [...wireHistory, { role: 'user', parts: [{ text: 'Condense the conversation ABOVE.' }] }],
+    tools: [{ functionDeclarations: [declaration, webSearch] }],
+  }
+
+  async function invoke({
+    provider = 'mock',
+    targetModel = model,
+    sessionId = 'sess-1',
+    loop = false,
+    purpose = 'compaction',
+    messages = [...historyMessages, { role: 'user', content: [{ type: 'text', text: 'Condense the conversation ABOVE.' }] }],
+    body = compactionBody,
+    intact = false,
+  } = {}) {
+    const input = `${baseURL}/models/${targetModel}:streamGenerateContent?alt=sse`
+    const headers = new Headers({ 'x-goog-api-key': 'synthetic', 'content-length': '1' })
+    const signal = new AbortController().signal
+    const request = Object.freeze({ provider, model: targetModel, sessionId, agent: loop, purpose, messages })
+    const init = { method: 'POST', headers, signal, body: JSON.stringify(body) }
+    let returnedResponse
+    const stream = handlers.get('llm/stream')(request, async function* () {
+      await Promise.resolve()
+      handlers.get('llm-pi-ai/request-headers')({ ...request, baseURL }, headers, () => headers)
+      returnedResponse = globalThis.fetch(input, init)
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'summary' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const chunks = []
+    for await (const chunk of stream) chunks.push(chunk)
+    const call = calls.at(-1)
+    if (intact) assert.strictEqual(call.init, init)
+    return { init: call.init, body: JSON.parse(call.init.body), chunks, returnedResponse }
+  }
+
+  const setSessionHeader = header => {
+    sessionsService = { get: id => id === 'sess-1' ? { requestHeader: () => header } : undefined }
+  }
+  setSessionHeader({ config: { provider: 'mock', model } })
+
+  // 1. nativeHistory + googleSearch enabled (even with XHigh enabled on session):
+  // aligns contents, functionResponse.id, tools, toolConfig; read-only (no replayState, no reportFor, no SSE wrap, no XHIGH).
+  const aligned = await invoke()
+  assert.strictEqual(aligned.returnedResponse, sentinelResponse, 'compaction must not wrap response for SSE observation')
+  assert.deepEqual(aligned.body.contents[1], { role: 'model', parts: nativeParts })
+  assert.equal(aligned.body.contents[2].parts[0].functionResponse.id, 'wire-read-1')
+  assert.deepEqual(aligned.body.tools, [{ functionDeclarations: [declaration] }, { googleSearch: {} }])
+  assert.equal(aligned.body.toolConfig.includeServerSideToolInvocations, true)
+  assert.equal(aligned.body.generationConfig, undefined, 'compaction must never inject XHIGH')
+  assert.equal(aligned.chunks.at(-1).replayState, undefined, 'compaction must not attach native replayState')
+  assert.equal(reports.length, 0, 'compaction must not call reportFor')
+
+  // 2. googleSearch only (nativeHistory: false) with XHigh enabled: aligns tools/toolConfig only, read-only.
+  routes = { mock: { localizePrompt: false, nativeHistory: false, googleSearch: true } }
+  const searchOnly = await invoke()
+  assert.strictEqual(searchOnly.returnedResponse, sentinelResponse, 'search-only compaction must not observe response')
+  assert.deepEqual(searchOnly.body.tools, [{ functionDeclarations: [declaration] }, { googleSearch: {} }])
+  assert.equal(searchOnly.body.toolConfig.includeServerSideToolInvocations, true)
+  assert.deepEqual(searchOnly.body.contents[1], wireHistory[1])
+  assert.equal(searchOnly.body.contents[2].parts[0].functionResponse.id, localId)
+  assert.equal(searchOnly.body.generationConfig, undefined)
+  assert.equal(reports.length, 0)
+
+  // 3. Cross-model, cross-provider, missing requestHeader, missing session, or missing sessions service: stay completely intact.
+  routes = {
+    mock: { localizePrompt: false, nativeHistory: true, googleSearch: true },
+    other: { localizePrompt: false, nativeHistory: true, googleSearch: true },
+  }
+  await invoke({ targetModel: 'gemini-3-flash', intact: true })
+  await invoke({ provider: 'other', intact: true })
+  await invoke({ sessionId: 'unknown-session', intact: true })
+  setSessionHeader(undefined)
+  await invoke({ intact: true })
+  sessionsService = null
+  await invoke({ intact: true })
+
+  // 4. Other auxiliary purposes (like session-title) stay completely intact even when same provider/model.
+  setSessionHeader({ config: { provider: 'mock', model } })
+  await invoke({ purpose: 'session-title', intact: true })
+  assert.equal(reports.length, 0)
 })
 
 const installed = process.env.DSH_INSTALL_DIR

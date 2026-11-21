@@ -270,3 +270,48 @@ test('functionResponse ID is stripped when the original Gemini functionCall had 
   assert.deepEqual(out.body.contents[1].parts, [noIdCall])
   assert.ok(!Object.hasOwn(out.body.contents[2].parts[0].functionResponse, 'id'))
 })
+
+test('patchGenerateContentBody aligns compaction requests with native history and rejects other auxiliary purposes', () => {
+  const embedded = attachNativeReplay(
+    { response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'gemini', model, stopReason: 'toolUse' }, blocks: [] },
+    makeNativeReplayData(route, model, frames, [localId], 'complete', prefix, blocks),
+  )
+  const tools = [{ functionDeclarations: [{ name: 'read_mock' }, { name: 'web_search' }] }]
+  const base = wireBody(blocks)
+  const mainBody = { ...base, tools }
+  const compactionBody = {
+    ...mainBody,
+    contents: [...mainBody.contents, { role: 'user', parts: [{ text: 'Condense the conversation ABOVE.' }] }],
+  }
+  const baseMessages = [
+    { role: 'user', content: [{ type: 'text', text: 'Check this' }] },
+    message(clone(embedded), blocks),
+    { role: 'tool', toolCallId: localId, content: [{ type: 'text', text: 'Done' }] },
+  ]
+  const mainReq = { provider: 'gemini', model, sessionId: 'offline', messages: baseMessages }
+  const compactionReq = {
+    ...mainReq,
+    purpose: 'compaction',
+    messages: [...baseMessages, { role: 'user', content: [{ type: 'text', text: 'Condense the conversation ABOVE.' }] }],
+  }
+
+  const mainOut = patchGenerateContentBody(mainBody, mainReq, route)
+  const compactionOut = patchGenerateContentBody(compactionBody, compactionReq, route)
+  assert.equal(compactionOut.changed, true)
+  assert.equal(JSON.stringify(compactionOut.body.contents.slice(0, 3)), JSON.stringify(mainOut.body.contents))
+  assert.equal(JSON.stringify(compactionOut.body.contents[1].parts), JSON.stringify(parts))
+  assert.equal(compactionOut.body.contents[2].parts[0].functionResponse.id, 'wire-read-9')
+  assert.deepEqual(compactionOut.body.tools, [{ functionDeclarations: [{ name: 'read_mock' }] }, { googleSearch: {} }])
+  assert.equal(compactionOut.body.toolConfig.includeServerSideToolInvocations, true)
+
+  // Other auxiliary purposes (such as session-title) must still be refused by nativeHistory().
+  const titleOut = patchGenerateContentBody(
+    mainBody,
+    { ...mainReq, purpose: 'session-title' },
+    { identity: route.identity, googleSearch: false },
+  )
+  assert.equal(titleOut.changed, false)
+  assert.deepEqual(titleOut.body.contents[1].parts, mainBody.contents[1].parts)
+  assert.equal(titleOut.body.contents[2].parts[0].functionResponse.id, localId)
+  assert.equal(titleOut.body.toolConfig, undefined)
+})

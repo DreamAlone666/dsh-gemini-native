@@ -20,7 +20,7 @@ DSH 在每一步组装系统提示词时，插件读取本步捕获的 `modelSel
 
 ### 2. Gemini 原生历史回放与 Google 原生搜索
 插件复用 DSH 内置 `pi-ai` Adapter（通过 `llm/stream` + `llm-pi-ai/request-headers` + 作用域 `fetch` 代理），图片、文件附件、多模态工具结果、自定义 headers、`thinkingBudgets`、OAuth／凭据解析、超时与错误分类均继续由内置 `pi-ai` 处理：
-- **出站修补**：开启 **原生历史回放** 时，将通过路由、模型和前缀指纹校验的历史 `model` 轮次 `parts` 替换为保留的原生 `parts` 并对齐 `functionResponse.id`；开启 **Google 原生搜索** 时，移除请求中的 DSH `web_search` 并挂载 `{ googleSearch: {} }`（不覆盖显式不兼容的 `toolConfig` / `functionCallingConfig`）。
+- **出站修补**：开启 **原生历史回放** 时，将通过路由、模型和前缀指纹校验的历史 `model` 轮次 `parts` 替换为保留的原生 `parts` 并对齐 `functionResponse.id`；开启 **Google 原生搜索** 时，移除请求中的 DSH `web_search` 并挂载 `{ googleSearch: {} }`（不覆盖显式不兼容的 `toolConfig` / `functionCallingConfig`）。同供应商同模型的 `compaction` 压缩请求也会做只读出站前缀对齐以复用隐式缓存，但不录制原生历史、不上报搜索卡片，也不带入 `XHigh`。
 - **入站旁路录制**：原始 SSE 字节原样透传给内置 `pi-ai`；开启 **原生历史回放** 时旁路录制原始 `frames` 并压缩嵌入 `pi-ai` 自身的 `replayState`（即使日后关闭原生回放或卸载插件，原有的 `pi-ai` 签名仍完好可用）。单帧 SSE 上限 1 MiB、单次原生记录上限 2 MiB，超限时仅跳过本次原生录制而不中断对话。
 - **搜索聊天卡片**：Gemini 返回原生搜索调用时，输入框下方实时显示「Google 搜索中…」；轮次结束后在轮尾展示可展开的搜索词与来源卡片。开启 **原生历史回放** 时，卡片由 `nativeSearchProjection` 从 Session 日志重建，重开会话仍可读；仅开启 **Google 原生搜索** 而关闭原生回放时，卡片仅在当前 Host 进程内临时保留。
 - **官方日志上传排除**：插件启用时，若会话已存有原生历史数据，将通过 DSH 的排除钩子跳过 `dsh_session_log` 官方上传；若停用插件，请在 DSH 中关闭该上传后再用官方模型打开曾记录过原生数据的会话。

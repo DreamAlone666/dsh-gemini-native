@@ -45,7 +45,7 @@ function replaceBody(init, body) {
 
 function scopedStream(scope, state, next) {
   const stream = scope.run(state, next)
-  if (!state?.nativeHistory) {
+  if (!state?.nativeHistory || state.readOnly) {
     return {
       [Symbol.asyncIterator]() {
         // Starting the waterfall alone is not enough: adapter dispatch and SDK
@@ -107,6 +107,13 @@ function scopedStream(scope, state, next) {
   }
 }
 
+function isSameCompactionRoute(ctx, request) {
+  const session = ctx.get?.('sessions')?.get?.(request.sessionId)
+  const routed = session?.requestHeader?.()?.config
+  return typeof routed?.provider === 'string' && routed.provider === request.provider
+    && typeof routed?.model === 'string' && routed.model === request.model
+}
+
 function loopRequestPredicate(ctx) {
   // Profiles mount the base LLM service inside the bootstrap Include. A
   // standalone composition can instead mount it directly on the root loader.
@@ -142,7 +149,29 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           && url.searchParams.get('alt') === 'sse') {
           const parsed = parseBody(init.body)
           if (parsed !== undefined) {
-            if (state.nativeHistory) {
+            if (state.readOnly) {
+              if (state.nativeHistory) {
+                let route
+                try {
+                  const baseURL = normalizeEndpoint(state.baseURL)
+                  route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
+                  route.identity = routeIdentity(route)
+                } catch { /* Non-standard endpoint stays untouched. */ }
+                if (route) {
+                  const patched = patchGenerateContentBody(parsed, state.request, route)
+                  if (patched?.changed) {
+                    const forwarded = replaceBody(init, JSON.stringify(patched.body))
+                    return previous.call(this, input, forwarded)
+                  }
+                }
+              } else if (state.googleSearch) {
+                const toolsPatched = applyGoogleSearchTools(parsed, true)
+                if (toolsPatched.changed) {
+                  const forwarded = replaceBody(init, JSON.stringify(toolsPatched.body))
+                  return previous.call(this, input, forwarded)
+                }
+              }
+            } else if (state.nativeHistory) {
               let route
               try {
                 const baseURL = normalizeEndpoint(state.baseURL)
@@ -214,6 +243,8 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           warnOnce('cannot identify Agent Loop requests on this DSH version; Gemini transport enhancements remain inactive.')
         } else if (isAgentLoopRequest(request)) {
           state = {
+            readOnly: false,
+            purpose: undefined,
             nativeHistory: routeCfg.nativeHistory,
             googleSearch: routeCfg.googleSearch,
             xhigh,
@@ -225,6 +256,22 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           }
         }
       }
+    } else if (active && request.purpose === 'compaction' && request.sessionId !== undefined) {
+      const routeCfg = routeConfigOf(config.routes.get(), request.provider)
+      if ((routeCfg.nativeHistory || routeCfg.googleSearch) && isSameCompactionRoute(ctx, request)) {
+        state = {
+          readOnly: true,
+          purpose: 'compaction',
+          nativeHistory: routeCfg.nativeHistory,
+          googleSearch: routeCfg.googleSearch,
+          xhigh: false,
+          provider: request.provider,
+          model: request.model,
+          sessionId: request.sessionId,
+          request,
+          capture: null,
+        }
+      }
     }
     if (state === undefined && scope.getStore() === undefined) return next()
     return scopedStream(scope, state, next)
@@ -233,7 +280,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
   ctx.on('llm-pi-ai/request-headers', (request, _headers, next) => {
     const state = scope.getStore()
     if (active && state && state.provider === request.provider && state.model === request.model
-      && state.sessionId === request.sessionId && request.purpose === undefined) {
+      && state.sessionId === request.sessionId && request.purpose === state.purpose) {
       state.url = generationUrl(request.baseURL, request.model)
       state.baseURL = request.baseURL
       if (state.url) installTransport()

@@ -7,7 +7,9 @@ import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import * as plugin from '../index.js'
 import { hasNativeReplay, nativeReplayOf } from '../generate-content.js'
+import { searchActivityPath } from '../google-search-activity.js'
 import { nativeSearchProjection } from '../native-search-projection.js'
+import { xhighPath } from '../xhigh.js'
 
 const installed = process.env.DSH_INSTALL_DIR
 const model = 'gemini-4-hydrogen'
@@ -232,4 +234,209 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       assert.ok(followupParts.some(part => part.functionCall?.name === 'read_mock' && part.thoughtSignature === validSig('signature-4')),
         'pi-ai tool-call signature survives even when native mode is turned off')
     } finally { await stored.close() }
+  })
+
+test('installed DSH: compaction aligns prefix byte-for-byte on same route without XHigh, recording, or search pollution, and skips cross-model compaction',
+  { skip: !installed, timeout: 12000 }, async t => {
+    const require = createRequire(join(installed, 'package.json'))
+    const load = spec => import(pathToFileURL(require.resolve(`@deepseek-ai/${spec}`)).href)
+    const { Context } = await load('cordis')
+    const { Loader } = await load('cordis-plugin-loader')
+    const { createUserMessage } = await load('dsh-llm')
+    const pi = await load('dsh-llm-pi-ai')
+    const { AgentRegistry } = await load('dsh-agent')
+    const { AgentLoop } = await load('dsh-agent-loop')
+    const { ToolsService } = await load('dsh-tools')
+    const { SystemPrompt } = await load('dsh-system-prompt')
+    const { SessionStore } = await load('dsh-session')
+    const { SessionProjectionRegistry } = await load('dsh-session-projection')
+    const persistence = await load('dsh-session-persistence-jsonl')
+    const executor = await load('dsh-tool-executor-native')
+    const { TokenMeter } = await load('dsh-token-meter')
+    const { BasicCompactionEngine } = await load('dsh-compaction-basic')
+
+    const root = await mkdtemp(join(tmpdir(), 'dsh-compaction-align-'))
+    const requests = []
+    const originalFetch = globalThis.fetch
+    const compactionFrames = [{
+      candidates: [{
+        index: 0,
+        content: { role: 'model', parts: [{ text: '## Primary Request and Intent\n- Checked status.' }] },
+        groundingMetadata: { webSearchQueries: ['compaction-noise'] },
+        finishReason: 'STOP',
+      }],
+    }]
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input)
+      const body = JSON.parse(init.body)
+      requests.push({ url, body, headers: new Headers(init.headers) })
+      const lastText = body.contents.at(-1)?.parts?.map(part => part.text ?? '').join('') ?? ''
+      if (lastText.includes('You are now acting as a compaction engine')) {
+        return sse(compactionFrames)
+      }
+      return sse(body.contents.length === 1 ? streamFrames : answerFrames)
+    }
+    const stacks = []
+    t.after(async () => {
+      globalThis.fetch = originalFetch
+      for (const cleanup of stacks.reverse()) await cleanup()
+      await rm(root, { recursive: true, force: true })
+    })
+
+    async function boot(compactionConfig = { auto: false }) {
+      const ctx = new Context()
+      const fibers = []
+      const routes = new Map()
+      const configPath = join(root, `cordis-${stacks.length}.json`)
+      await writeFile(configPath, JSON.stringify([]))
+      const llmURL = pathToFileURL(require.resolve('@deepseek-ai/dsh-llm')).href
+      const loader = ctx.plugin(class extends Loader { commit() {} }, { baseUrl: pathToFileURL(configPath).href })
+      await loader
+      ctx.loader.builtins.pi = pi
+      ctx.loader.builtins.enhancer = plugin
+      ctx.provide('connection', {
+        fetch: {
+          register(def) {
+            routes.set(def.path, def)
+            return () => routes.delete(def.path)
+          },
+        },
+      })
+      ctx.provide('credentials', { async resolve(ref) { return { value: `mock-${ref}` } }, async readRecord() {} })
+      for (const mod of [SessionStore, SessionProjectionRegistry]) {
+        const fiber = ctx.plugin(mod); fibers.push(fiber); await fiber
+      }
+      const persist = ctx.plugin(persistence, { root, compression: 'none' }); fibers.push(persist); await persist
+      const meter = ctx.plugin(TokenMeter, {}); fibers.push(meter); await meter
+      await ctx.loader.create({ id: 'llm', name: llmURL })
+      await ctx.loader.create({ id: 'llm-pi-ai', name: 'cordis:pi', config: { providers: {
+        native: {
+          api: 'google-generative-ai', baseURL: 'https://native.test/v1beta', apiKeyEnv: 'NATIVE_KEY',
+          models: [
+            { id: model, reasoningEfforts: { off: null, medium: 'medium', high: 'high' } },
+            { id: 'gemini-3-flash' },
+          ],
+        },
+      } } })
+      for (const mod of [AgentRegistry, ToolsService, SystemPrompt, executor, AgentLoop]) {
+        const fiber = ctx.plugin(mod); fibers.push(fiber); await fiber
+      }
+      const compaction = ctx.plugin(BasicCompactionEngine, compactionConfig); fibers.push(compaction); await compaction
+      await ctx.loader.create({
+        id: 'enhancer',
+        name: 'cordis:enhancer',
+        config: { routes: { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } } },
+      })
+      await ctx.loader.await()
+      ctx.tools.register({
+        name: 'read_mock', description: 'read_mock', parameters: { type: 'object' },
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute() { return 'done '.repeat(80) },
+      })
+      ctx.tools.register({
+        name: 'web_search', description: 'web_search', parameters: { type: 'object' },
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute() { return 'local-search' },
+      })
+      stacks.push(async () => {
+        await loader.dispose()
+        for (const fiber of fibers.reverse()) await fiber.dispose()
+      })
+      return { ctx, routes }
+    }
+
+    // 1. Same-provider, same-model compaction with nativeHistory + googleSearch + XHigh enabled.
+    const same = await boot({ auto: false })
+    const agent = await same.ctx.agentLoop.create('compaction-same-route', {
+      provider: 'native', model, reasoningEffort: 'medium',
+    })
+    const enableXHigh = await same.routes.get(xhighPath).fetch(new Request(`http://localhost${xhighPath}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: agent.id, enabled: true }),
+    }))
+    assert.equal(enableXHigh.status, 200)
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Inspect native history and search state. '.repeat(20) }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+    assert.equal(requests.length, 2)
+    const mainStep2 = requests[1].body
+    assert.equal(mainStep2.generationConfig?.thinkingConfig?.thinkingLevel, 'XHIGH', 'main turn must use XHIGH')
+    assert.deepEqual(mainStep2.contents[1], { role: 'model', parts })
+    assert.equal(mainStep2.contents[2].parts[0].functionResponse.id, 'read-1')
+    const nativeCountBefore = agent.session.snapshotEvents().filter(hasNativeReplay).length
+    const seqBeforeCompaction = agent.session.seq
+
+    const compacted = await same.ctx.compaction.compactNow(agent, new AbortController().signal)
+    assert.ok(compacted, 'compactNow should produce a durable checkpoint')
+    assert.equal(requests.length, 3)
+    const compactionReq = requests[2].body
+
+    // Byte-for-byte prefix alignment with main conversation request.
+    assert.equal(JSON.stringify(compactionReq.systemInstruction), JSON.stringify(mainStep2.systemInstruction))
+    assert.equal(JSON.stringify(compactionReq.tools), JSON.stringify(mainStep2.tools))
+    assert.equal(JSON.stringify(compactionReq.toolConfig), JSON.stringify(mainStep2.toolConfig))
+    assert.equal(
+      JSON.stringify(compactionReq.contents.slice(0, mainStep2.contents.length)),
+      JSON.stringify(mainStep2.contents),
+      'compaction historical contents must match main conversation prefix byte-for-byte',
+    )
+    assert.notEqual(
+      compactionReq.generationConfig?.thinkingConfig?.thinkingLevel,
+      'XHIGH',
+      'compaction must never inject XHIGH',
+    )
+
+    // Verify no projection pollution, no activity leakage, and no native recording for compaction.
+    assert.deepEqual(
+      same.ctx.sessionProjections.snapshot(agent.session).values[nativeSearchProjection.key],
+      { 1: searchSummary },
+    )
+    const eventsAfterCompaction = agent.session.snapshotEvents(seqBeforeCompaction)
+    assert.equal(eventsAfterCompaction.some(hasNativeReplay), false)
+    assert.equal(JSON.stringify(eventsAfterCompaction).includes('dshGeminiNative'), false)
+    assert.equal(agent.session.snapshotEvents().filter(hasNativeReplay).length, nativeCountBefore)
+
+    const activityRes = same.routes.get(searchActivityPath).fetch(
+      new Request(`http://localhost${searchActivityPath}?sessionId=${agent.id}`),
+    )
+    const activityReader = activityRes.body.getReader()
+    try {
+      const activity = JSON.parse(new TextDecoder().decode((await activityReader.read()).value).slice(6))
+      assert.deepEqual(activity, { liveTurn: null, cards: [] })
+    } finally {
+      await activityReader.cancel()
+    }
+
+    // 2. Cross-model compaction on the same provider (gemini-3-flash instead of gemini-4-hydrogen) must stay untouched.
+    const cross = await boot({
+      auto: false,
+      summarizationProvider: 'native',
+      summarizationModel: 'gemini-3-flash',
+    })
+    const crossAgent = await cross.ctx.agentLoop.create('compaction-cross-model', {
+      provider: 'native', model,
+    })
+    crossAgent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Inspect cross-model compaction. '.repeat(20) }],
+      source: { kind: 'user' },
+    }))
+    await crossAgent.whenIdle()
+    const beforeCrossCompact = requests.length
+    const crossCompacted = await cross.ctx.compaction.compactNow(crossAgent, new AbortController().signal)
+    assert.ok(crossCompacted)
+    assert.equal(requests.length, beforeCrossCompact + 1)
+    const crossReq = requests[beforeCrossCompact]
+    assert.match(crossReq.url.pathname, /\/models\/gemini-3-flash:streamGenerateContent$/u)
+    assert.equal(crossReq.body.tools.some(tool => Object.hasOwn(tool, 'googleSearch')), false)
+    assert.deepEqual(
+      crossReq.body.tools.flatMap(tool => tool.functionDeclarations?.map(fn => fn.name) ?? []),
+      ['read_mock', 'web_search'],
+    )
+    assert.equal(crossReq.body.toolConfig?.includeServerSideToolInvocations, undefined)
+    assert.equal(crossReq.body.contents[1].parts.some(part => Object.hasOwn(part, 'toolCall')), false)
+    assert.notEqual(crossReq.body.generationConfig?.thinkingConfig?.thinkingLevel, 'XHIGH')
   })

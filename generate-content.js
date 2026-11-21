@@ -300,7 +300,8 @@ function sameTextBlocks(left, right) {
 }
 
 function nativeHistory(message, route, request, prefix, allowCirculation) {
-  if (request.purpose !== undefined || message.source?.provider !== request.provider || message.source?.model !== request.model) return
+  if ((request.purpose !== undefined && request.purpose !== 'compaction')
+    || message.source?.provider !== request.provider || message.source?.model !== request.model) return
   const envelope = message.source.replayState
   const metadata = extractNativeData(envelope)
   if (!metadata || metadata.model !== request.model || metadata.route !== route.identity || metadata.outcome !== 'complete'
