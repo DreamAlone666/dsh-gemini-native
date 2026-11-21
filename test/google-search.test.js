@@ -38,7 +38,7 @@ function transportFixture(t) {
     logger: { warn: message => warnings.push(message) },
     on: (event, fn) => handlers.set(event, fn),
     effect: start => { cleanup = start() },
-  }, { routes: { get: () => routes } }, plugin.routeConfigOf)
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, undefined, undefined, undefined, provider => provider === 'mock')
 
   function run({ provider = 'mock', loop = true, purpose, input = generation, rawBody = JSON.stringify(baseBody), intact = false } = {}) {
     const headers = new Headers({ 'x-goog-api-key': 'synthetic', 'content-length': '1' })
@@ -72,7 +72,7 @@ function transportFixture(t) {
 
 test('rewrites only scoped Gemini provider requests, preserving request and response ownership', async t => {
   const f = transportFixture(t)
-  f.setRoutes({})
+  f.setRoutes({ mock: { nativeHistory: false } })
   await f.run({ intact: true })
   assert.equal(globalThis.fetch, f.offlineFetch)
   f.setRoutes({ mock: { localizePrompt: false, nativeHistory: false, googleSearch: true } })
@@ -130,7 +130,7 @@ test('replaces only web_search and preserves other declarations, grouping and ro
   assert.deepEqual(JSON.parse(combinedEntry.body).tools, [anotherNativeTool, { googleSearch: {} }])
   await f.run({ rawBody: raw(grouped, calling(['web_search'])), intact: true })
   await f.run({ rawBody: raw(grouped, { functionCallingConfig: { mode: 'AUTO' } }), intact: true })
-  f.setRoutes({})
+  f.setRoutes({ mock: { nativeHistory: false } })
   await f.run({ rawBody: raw(grouped), intact: true })
   f.cleanup()
 })
@@ -165,8 +165,8 @@ test('geminiTransport performs read-only prefix alignment for same-route compact
     logger: { warn() {} },
     on: (event, fn) => handlers.set(event, fn),
     effect: start => { cleanup = start() },
-  }, { routes: { get: () => routes } }, plugin.routeConfigOf, (sessionId, liveOnly) => {
-    reports.push({ sessionId, liveOnly })
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, (sessionId) => {
+    reports.push(sessionId)
     return () => {}
   }, sessionId => sessionId === 'sess-1')
   t.after(() => cleanup?.())
@@ -313,7 +313,7 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
   await system
   await loader
   ctx.loader.builtins.include = Include
-  ctx.loader.builtins.enhancement = plugin
+  ctx.loader.builtins.geminiNative = plugin
   await ctx.loader.create({ id: 'include', name: 'cordis:include', config: { path: configUrl } })
   await ctx.loader.await()
   assert.strictEqual(ctx.loader.resolve('include:llm').moduleNamespace.isAgentLoopRequest, llm.isAgentLoopRequest)
@@ -323,13 +323,13 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
   })
   const routes = new Map()
   ctx.provide('connection', { fetch: { register(route) { routes.set(route.path, route) } } })
-  const adapter = ctx.plugin(pi, { providers: {
+  ctx.loader.builtins.pi = pi
+  await ctx.loader.create({ id: 'llm-pi-ai', name: 'cordis:pi', config: { providers: {
     gemini: { api: 'google-generative-ai', baseURL, apiKeyEnv: 'SYNTHETIC_KEY', models: [{ id: model }, { id: 'gemini-3-flash' }] },
     gateway: { api: 'google-generative-ai', baseURL: 'https://gateway.test/v1beta', apiKeyEnv: 'SYNTHETIC_KEY', models: [{ id: model }] },
     compatible: { api: 'openai-completions', baseURL: 'https://openai.test/v1', apiKeyEnv: 'SYNTHETIC_KEY', models: [{ id: model }] },
-  } })
-  t.after(() => adapter.dispose())
-  await adapter
+  } } })
+  await ctx.loader.await()
 
   const original = globalThis.fetch
   const captures = new Map()
@@ -352,8 +352,8 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
   }
   globalThis.fetch = offline
   t.after(() => { globalThis.fetch = original })
-  await ctx.loader.create({ id: 'gemini-enhancement', name: 'cordis:enhancement', config: {} })
-  const fiber = ctx.loader.resolve('gemini-enhancement').fiber
+  await ctx.loader.create({ id: 'gemini-native', name: 'cordis:geminiNative', config: {} })
+  const fiber = ctx.loader.resolve('gemini-native').fiber
 
   function invoke(label, { provider = 'gemini', selected = model, loop = true, purpose } = {}) {
     return (async () => {
@@ -368,7 +368,7 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
       }
     })()
   }
-  const update = config => ctx.loader.update('gemini-enhancement', { config })
+  const update = config => ctx.loader.update('gemini-native', { config })
   const injected = label => captures.get(label).body.tools.some(tool => Object.hasOwn(tool, 'googleSearch'))
   const declarations = label => captures.get(label).body.tools.flatMap(tool =>
     tool.functionDeclarations?.map(item => item.name) ?? [tool.function?.name].filter(Boolean))
@@ -377,11 +377,12 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
   await invoke('default-off')
   assert.equal(injected('default-off'), false)
   assert.deepEqual(declarations('default-off'), localTools)
-  assert.equal(globalThis.fetch, offline)
+  // Native replay defaults to on; Search is still off.
+  assert.notStrictEqual(globalThis.fetch, offline)
 
   // Enable Google Search on `gemini` (all models on that provider), leave `gateway` unconfigured.
   await update({ routes: { gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true } } })
-  assert.strictEqual(ctx.loader.resolve('gemini-enhancement').fiber, fiber)
+  assert.strictEqual(ctx.loader.resolve('gemini-native').fiber, fiber)
   await Promise.all([
     invoke('matched'),
     invoke('second-model', { selected: 'gemini-3-flash' }),
@@ -423,8 +424,8 @@ test('installed DSH: Loader, per-provider transport scoping, SDK payload, activi
   await invoke('toggle-off-live')
   assert.equal(injected('toggle-off-live'), false)
   assert.deepEqual(declarations('toggle-off-live'), localTools)
-  assert.strictEqual(ctx.loader.resolve('gemini-enhancement').fiber, fiber)
-  await ctx.loader.update('gemini-enhancement', {
+  assert.strictEqual(ctx.loader.resolve('gemini-native').fiber, fiber)
+  await ctx.loader.update('gemini-native', {
     config: { routes: { gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true } } },
     disabled: true,
   })

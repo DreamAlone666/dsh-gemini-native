@@ -155,10 +155,14 @@ export function createSseDecoder(observe, { frameLimit = maxFrameBytes, invalid 
 
   function append(byte) {
     if (used === frameLimit) oversized = true
-    if (!oversized) {
-      frame ??= new Uint8Array(frameLimit)
-      frame[used++] = byte
+    if (oversized) return
+    if (!frame) frame = new Uint8Array(Math.min(frameLimit, 4096))
+    else if (used === frame.length) {
+      const larger = new Uint8Array(Math.min(frameLimit, frame.length * 2))
+      larger.set(frame)
+      frame = larger
     }
+    frame[used++] = byte
   }
 
   function endLine() {

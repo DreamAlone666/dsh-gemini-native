@@ -83,7 +83,16 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       requests.push({ url, body, headers: new Headers(init.headers) })
       if (mode === 'drop') return sse([streamFrames[3]])
       if (mode === 'max-tokens') return sse([frame([{ text: 'cut ' }]), frame([{ text: 'short' }], 'MAX_TOKENS')])
-      return sse(body.contents.length === 1 ? streamFrames : answerFrames)
+      // pi-ai selects candidates[0], even if a relay returns a different index
+      // first. The alternate has identical text but different opaque fields.
+      const frames = body.contents.length === 1 ? streamFrames : answerFrames
+      return sse(frames.map(({ candidates: [actual] }) => ({
+        candidates: [{ ...actual, index: 1 }, {
+          ...actual,
+          index: 0,
+          content: { ...actual.content, parts: actual.content.parts.map(part => ({ ...part, alternateOnly: true })) },
+        }],
+      })))
     }
     globalThis.fetch = transport
     const stacks = []
@@ -102,7 +111,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       const loader = ctx.plugin(class extends Loader { commit() {} }, { baseUrl: pathToFileURL(configPath).href })
       await loader
       ctx.loader.builtins.pi = pi
-      ctx.loader.builtins.enhancer = plugin
+      ctx.loader.builtins.geminiNative = plugin
       const privacy = {}
       ctx.provide('sessionLogDeepSeek', { registerExclusion(predicate) { privacy.exclude = predicate } })
       ctx.provide('credentials', { async resolve(ref) { return { value: `mock-${ref}` } }, async readRecord() {} })
@@ -122,7 +131,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
         const fiber = ctx.plugin(mod); fibers.push(fiber); await fiber
       }
       if (pluginConfig) {
-        await ctx.loader.create({ id: 'enhancer', name: 'cordis:enhancer', config: pluginConfig })
+        await ctx.loader.create({ id: 'geminiNative', name: 'cordis:geminiNative', config: pluginConfig })
       }
       await ctx.loader.await()
       stacks.push(async () => {
@@ -171,8 +180,6 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
     assert.equal(diag.consecutiveNative, 2)
     assert.equal(diag.hasNativePayload, true)
     assert.ok(diag.nativeBytes > 0)
-    assert.equal(diag.lastNativeModel, model)
-    assert.equal(diag.lastNativeOutcome, 'complete')
     assert.equal(diag.searchCards, 1)
     assert.equal(diag.searchQueries, 1)
     assert.equal(diag.searchSources, 1)
@@ -214,7 +221,9 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       assert.deepEqual(first.data.message.content.map(block => block.type), ['reasoning', 'text', 'tool-call'])
       assert.equal(first.data.message.content[0].text, '先查一下 最新状态。')
       assert.equal(first.data.message.content[1].text, parts[2].text + parts[3].text)
-      assert.deepEqual(nativeReplayOf(first).frames.flatMap(entry => entry[0].content.parts), parts)
+      const replay = nativeReplayOf(first)
+      assert.ok(replay.frames.every(frame => frame.length === 1), 'alternate candidate must not be stored')
+      assert.deepEqual(replay.frames.flatMap(entry => entry[0].content.parts), parts)
       // Second turn streamed across 3 frames renders as ONE coalesced text block.
       assert.deepEqual(messages[1].data.message.content, [{
         type: 'text',
@@ -311,7 +320,7 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
       const loader = ctx.plugin(class extends Loader { commit() {} }, { baseUrl: pathToFileURL(configPath).href })
       await loader
       ctx.loader.builtins.pi = pi
-      ctx.loader.builtins.enhancer = plugin
+      ctx.loader.builtins.geminiNative = plugin
       ctx.provide('connection', {
         fetch: {
           register(def) {
@@ -341,8 +350,8 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
       }
       const compaction = ctx.plugin(BasicCompactionEngine, compactionConfig); fibers.push(compaction); await compaction
       await ctx.loader.create({
-        id: 'enhancer',
-        name: 'cordis:enhancer',
+        id: 'geminiNative',
+        name: 'cordis:geminiNative',
         config: { routes: { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } } },
       })
       await ctx.loader.await()
@@ -387,6 +396,13 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
     assert.equal(mainStep2.contents[2].parts[0].functionResponse.id, 'read-1')
     const nativeCountBefore = agent.session.snapshotEvents().filter(hasNativeReplay).length
     const seqBeforeCompaction = agent.session.seq
+    async function activity() {
+      const response = same.routes.get(searchActivityPath).fetch(new Request(`http://localhost${searchActivityPath}?sessionId=${agent.id}`))
+      const reader = response.body.getReader()
+      try { return JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6)) }
+      finally { await reader.cancel() }
+    }
+    const activityBefore = await activity()
 
     const compacted = await same.ctx.compaction.compactNow(agent, new AbortController().signal)
     assert.ok(compacted, 'compactNow should produce a durable checkpoint')
@@ -422,16 +438,7 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
     assert.equal(JSON.stringify(eventsAfterCompaction).includes('dshGeminiNative'), false)
     assert.equal(agent.session.snapshotEvents().filter(hasNativeReplay).length, nativeCountBefore)
 
-    const activityRes = same.routes.get(searchActivityPath).fetch(
-      new Request(`http://localhost${searchActivityPath}?sessionId=${agent.id}`),
-    )
-    const activityReader = activityRes.body.getReader()
-    try {
-      const activity = JSON.parse(new TextDecoder().decode((await activityReader.read()).value).slice(6))
-      assert.deepEqual(activity, { liveTurn: null, cards: [] })
-    } finally {
-      await activityReader.cancel()
-    }
+    assert.deepEqual(await activity(), activityBefore, 'compaction must not publish search activity')
 
     // 2. Cross-model compaction on the same provider (gemini-3-flash instead of gemini-4-hydrogen) must stay untouched.
     const cross = await boot({
@@ -532,6 +539,7 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     targetBaseURL = baseURL,
     loop = true,
     purpose,
+    stopBeforeFinish = false,
     body = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], tools: [{ functionDeclarations: [declaration] }] },
   } = {}) {
     const request = Object.freeze({ provider: 'native', model: targetModel, sessionId: 'sess-1', agent: loop, purpose, messages: [] })
@@ -546,7 +554,9 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     })
-    for await (const _chunk of stream) {}
+    for await (const chunk of stream) {
+      if (stopBeforeFinish && chunk.type === 'block-end') break
+    }
   }
 
   // 1. url-mismatch when baseURL is non-HTTP(S).
@@ -558,7 +568,6 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
       provider: 'native',
       model,
       status: 'url-mismatch',
-      host: 'bad.host.test',
       totalHistoryTurns: null,
       replayedHistoryTurns: null,
       searchConfigured: true,
@@ -582,7 +591,6 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     provider: 'native',
     model,
     status: 'ok',
-    host: 'gemini.test',
     totalHistoryTurns: 0,
     replayedHistoryTurns: 0,
     searchConfigured: true,
@@ -599,6 +607,12 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
   assert.equal(recorded[1].snapshot.recordStatus, 'saved')
   assert.equal(recorded[1].snapshot.recordedFrames, 1)
   assert.ok(recorded[1].snapshot.recordedBytes > 0)
+
+  // Captured frames have not been saved if the consumer stops before finish.
+  recorded.length = 0
+  await runCall({ stopBeforeFinish: true })
+  assert.equal(recorded.at(-1).snapshot.recordedFrames, 1)
+  assert.equal(recorded.at(-1).snapshot.recordStatus, 'none')
 
   // 3. nativeHistory overflow (> 2MB).
   recorded.length = 0
@@ -637,7 +651,6 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     provider: 'native',
     model,
     status: 'ok',
-    host: 'gemini.test',
     totalHistoryTurns: null,
     replayedHistoryTurns: null,
     searchConfigured: true,

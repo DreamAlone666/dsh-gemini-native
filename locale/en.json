@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Gemini Enhancement",
-    "description": "Configure per-provider enhancements directly inside each Gemini API provider card under Settings → Models: Simplified Chinese system prompt localization, Gemini native history replay, and native Google Search (replacing built-in web_search). All options are off by default; routing and extra model calls are untouched."
+    "title": "Gemini Native",
+    "description": "Use Gemini's native history replay, Google Search, and XHigh alongside Simplified Chinese system prompts in DeepSeek Harness. Configure Gemini API routes in Settings → Models. Native history replay and the status notice are on by default; Search and localization are opt-in. Replay stores extra response data in the Session log."
   }
 }

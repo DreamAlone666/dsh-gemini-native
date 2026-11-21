@@ -259,6 +259,11 @@ export function nativeReplayOf(event) {
 
 export const hasNativeReplay = event => nativeEnvelopeOf(event) !== undefined
 
+export function nativeReplayBytes(event) {
+  const data = extractNativeData(nativeEnvelopeOf(event))
+  return data === undefined ? 0 : Buffer.byteLength(JSON.stringify(data))
+}
+
 // Candidate zero may not be the first entry of a later streamed frame.
 export function selectedCandidate(candidates) {
   if (!Array.isArray(candidates)) return
@@ -266,16 +271,17 @@ export function selectedCandidate(candidates) {
     ?? (candidates[0]?.index === undefined ? candidates[0] : undefined)
 }
 
-// Store every candidate's content in order, but never mix alternate candidates
-// into the selected output or its subsequent model history.
+// Record only the first candidate, matching pi-ai. Normalize its index so
+// the same v1/v2 reader can decode it and older multi-candidate records.
 export function responseFrame(payload) {
-  if (!Array.isArray(payload.candidates)) return
-  return payload.candidates.map(candidate => candidate == null ? null : {
-    ...candidate.index === undefined ? {} : { index: candidate.index },
+  const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : undefined
+  if (!isObject(candidate)) return
+  return [{
+    ...candidate.index === undefined ? {} : { index: 0 },
     ...candidate.content === undefined ? {} : { content: candidate.content },
     ...candidate.groundingMetadata === undefined ? {} : { groundingMetadata: candidate.groundingMetadata },
     ...candidate.finishReason === undefined ? {} : { finishReason: candidate.finishReason },
-  })
+  }]
 }
 
 function groupedTextBlocks(rawParts) {
@@ -299,14 +305,8 @@ function sameTextBlocks(left, right) {
   return left.length === right.length && left.every((block, i) => block.type === right[i].type && block.text === right[i].text)
 }
 
-function nativeHistory(message, route, request, prefix, allowCirculation) {
-  if ((request.purpose !== undefined && request.purpose !== 'compaction')
-    || message.source?.provider !== request.provider || message.source?.model !== request.model) return
-  const envelope = message.source.replayState
-  const metadata = extractNativeData(envelope)
-  if (!metadata || metadata.model !== request.model || metadata.route !== route.identity || metadata.outcome !== 'complete'
-    || metadata.prefix !== prefix) return
-  const state = readNativeReplay(envelope, message.content)
+function nativeHistory(message, allowCirculation) {
+  const state = readNativeReplay(message.source.replayState, message.content)
   if (!state) return
   const rawParts = []
   for (const frame of state.frames) {
@@ -412,14 +412,32 @@ export function applyGoogleSearchTools(body, enableSearch, requiresCirculation =
   return { body: changed ? next : body, changed }
 }
 
-function findNativeAssistant(assistants, startIndex, request, route, prefix, wireParts, allowCirculation) {
+function indexNativeAssistants({ provider, model, messages, purpose }, route) {
+  const byPrefix = new Map()
+  if ((purpose !== undefined && purpose !== 'compaction') || !Array.isArray(messages)) return byPrefix
+  for (const [index, message] of messages.entries()) {
+    if (message?.role !== 'assistant' || message.source?.provider !== provider || message.source?.model !== model) continue
+    const metadata = extractNativeData(message.source?.replayState)
+    if (!metadata || metadata.model !== model || metadata.route !== route.identity || metadata.outcome !== 'complete'
+      || typeof metadata.prefix !== 'string') continue
+    const candidate = { index, message }
+    const bucket = byPrefix.get(metadata.prefix)
+    if (bucket) bucket.push(candidate)
+    else byPrefix.set(metadata.prefix, [candidate])
+  }
+  return byPrefix
+}
+
+function findNativeAssistant(candidates, startIndex, wireParts, allowCirculation) {
+  if (!candidates) return
   const wireCalls = wireParts.filter(part => isObject(part?.functionCall))
-  for (let i = startIndex; i < assistants.length; i++) {
-    const native = nativeHistory(assistants[i], route, request, prefix, allowCirculation)
+  for (const { index, message } of candidates) {
+    if (index < startIndex) continue
+    const native = nativeHistory(message, allowCirculation)
     if (!native) continue
     if (wireCalls.length !== native.local.length
       || wireCalls.some((part, j) => part.functionCall.name !== native.local[j].name)) continue
-    return { index: i, native }
+    return { index, native }
   }
 }
 
@@ -437,8 +455,11 @@ export function patchGenerateContentBody(body, request, route) {
   const systemParts = Array.isArray(body.systemInstruction?.parts)
     ? body.systemInstruction.parts
     : typeof body.systemInstruction === 'string' ? [{ text: body.systemInstruction }] : []
-  const assistants = Array.isArray(request.messages)
-    ? request.messages.filter(message => message.role === 'assistant') : []
+  const assistantsByPrefix = indexNativeAssistants(request, route)
+  // Keep the [systemParts, contents] JSON array open. Copy the hash state (not
+  // the contents) at model turns; hash each entry only after patching it.
+  const prefixHash = assistantsByPrefix.size > 0
+    ? createHash('sha256').update(`[${JSON.stringify(systemParts)},[`) : null
   const allowCirculation = route.googleSearch === true
     && !(isObject(body.toolConfig) && body.toolConfig.includeServerSideToolInvocations === false)
 
@@ -451,11 +472,13 @@ export function patchGenerateContentBody(body, request, route) {
   let replayedModelTurns = 0
 
   for (const entry of body.contents) {
+    const previousCalls = pendingCalls
+    pendingCalls = null
+    let nextEntry = entry
     if (entry?.role === 'model' && Array.isArray(entry.parts)) {
       totalModelTurns++
-      pendingCalls = null
-      const prefix = historyFingerprint(patchedContents, systemParts)
-      const match = findNativeAssistant(assistants, assistantCursor, request, route, prefix, entry.parts, allowCirculation)
+      const candidates = prefixHash && assistantsByPrefix.get(prefixHash.copy().update(']]').digest('hex'))
+      const match = findNativeAssistant(candidates, assistantCursor, entry.parts, allowCirculation)
       if (match) {
         replayedModelTurns++
         assistantCursor = match.index + 1
@@ -473,21 +496,17 @@ export function patchGenerateContentBody(body, request, route) {
           }
           pendingCalls = { byLocalId, ordered }
         }
-        patchedContents.push({ ...entry, parts })
+        nextEntry = { ...entry, parts }
         contentsChanged = true
-        continue
       }
-      patchedContents.push(entry)
-      continue
-    }
-    if (entry?.role === 'user' && Array.isArray(entry.parts) && pendingCalls) {
+    } else if (entry?.role === 'user' && Array.isArray(entry.parts) && previousCalls) {
       let orderIndex = 0
       let entryChanged = false
       const parts = entry.parts.map(part => {
         if (!isObject(part?.functionResponse)) return part
         const response = part.functionResponse
-        const matched = (typeof response.id === 'string' ? pendingCalls.byLocalId.get(response.id) : undefined)
-          ?? (pendingCalls.ordered[orderIndex]?.name === response.name ? pendingCalls.ordered[orderIndex] : undefined)
+        const matched = (typeof response.id === 'string' ? previousCalls.byLocalId.get(response.id) : undefined)
+          ?? (previousCalls.ordered[orderIndex]?.name === response.name ? previousCalls.ordered[orderIndex] : undefined)
         orderIndex++
         if (!matched) return part
         if (matched.wireId !== undefined) {
@@ -500,19 +519,19 @@ export function patchGenerateContentBody(body, request, route) {
         entryChanged = true
         return { ...part, functionResponse: rest }
       })
-      pendingCalls = null
       if (entryChanged) {
-        patchedContents.push({ ...entry, parts })
+        nextEntry = { ...entry, parts }
         contentsChanged = true
-        continue
       }
-    } else {
-      pendingCalls = null
     }
-    patchedContents.push(entry)
+    if (prefixHash) {
+      if (patchedContents.length > 0) prefixHash.update(',')
+      prefixHash.update(JSON.stringify(nextEntry) ?? 'null')
+    }
+    patchedContents.push(nextEntry)
   }
 
-  const nextPrefix = historyFingerprint(patchedContents, systemParts)
+  const nextPrefix = prefixHash?.update(']]').digest('hex') ?? historyFingerprint(patchedContents, systemParts)
   const contentBody = contentsChanged ? { ...body, contents: patchedContents } : body
   const tools = applyGoogleSearchTools(contentBody, route.googleSearch === true, requiresCirculation)
   return {

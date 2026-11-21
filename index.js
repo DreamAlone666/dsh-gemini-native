@@ -6,26 +6,25 @@ import { googleSearchActivity } from './google-search-activity.js'
 import { hasNativeReplay } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
 import { diagnosticsProjection } from './diagnostics-projection.js'
-import { webSearchScope } from './web-search-scope.js'
+import { isGeminiProvider, webSearchScope } from './web-search-scope.js'
 import { xhighState } from './xhigh.js'
 
 export const inject = ['systemPrompt']
 
 export const RouteConfig = Schema.object({
   localizePrompt: Schema.boolean().default(false)
-    .description('Localize known DSH system prompts into Simplified Chinese on this Gemini provider.'),
-  nativeHistory: Schema.boolean().default(false)
-    .description('Preserve and replay Gemini native parts (signatures, server-side tool parts, opaque fields) on this route.'),
+    .description('Translate built-in DSH system prompts into Simplified Chinese.'),
+  nativeHistory: Schema.boolean().default(true)
+    .description('Save and replay Gemini native conversation parts.'),
   googleSearch: Schema.boolean().default(false)
-    .description('Replace DSH web_search with native Google Search alongside local functions on this Gemini route.'),
+    .description('Use native Google Search instead of DSH web_search.'),
 })
 
 export const Config = Schema.object({
-  // The DSH Settings service only exposes volatile fields to Web forms.
   routes: Schema.dict(RouteConfig).default({})
-    .description('Per-provider Gemini enhancements configured on Gemini API routes.').volatile(),
-  showStatusNotice: Schema.boolean().default(false)
-    .description('Show a subtle composer notice for active Gemini enhancements.').volatile(),
+    .description('Settings by Gemini API provider.').volatile(),
+  showStatusNotice: Schema.boolean().default(true)
+    .description('Show Gemini status under the composer.').volatile(),
 })
 
 export function routeConfigOf(routes, provider) {
@@ -34,7 +33,7 @@ export function routeConfigOf(routes, provider) {
     : undefined
   return {
     localizePrompt: entry?.localizePrompt === true,
-    nativeHistory: entry?.nativeHistory === true,
+    nativeHistory: entry?.nativeHistory !== false,
     googleSearch: entry?.googleSearch === true,
   }
 }
@@ -90,7 +89,7 @@ function localizeSections(presentation) {
 export function apply(ctx, config) {
   let observerFor
   let notice
-  const reportFor = (sessionId, liveOnly = false) => observerFor?.reportFor(sessionId, liveOnly)
+  const reportFor = sessionId => observerFor?.reportFor(sessionId)
   const recordTransport = (sessionId, snapshot) => notice?.recordTransport?.(sessionId, snapshot)
   const xhigh = ctx.inject ? xhighState(ctx) : undefined
   ctx.inject?.(['sessionProjections'], child => {
@@ -122,8 +121,9 @@ export function apply(ctx, config) {
   })
   ctx.inject?.(['llm', 'loader'], child => geminiTransport(
     child, config, routeConfigOf, reportFor, sessionId => xhigh.isEnabled(sessionId), recordTransport,
+    provider => isGeminiProvider(child, provider),
   ))
-  ctx.inject?.(['tools', 'agents'], child => webSearchScope(ctx, child, config, routeConfigOf))
+  ctx.inject?.(['tools', 'agents', 'llm', 'loader'], child => webSearchScope(ctx, child, config, routeConfigOf))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, routeConfigOf)
     observerFor = googleSearchActivity(child)
@@ -132,7 +132,10 @@ export function apply(ctx, config) {
   ctx.on('system-prompt/assemble', async (_presentation, context, next) => {
     // Scope prompt localization to the exact Gemini provider selected for this step.
     const provider = context?.modelSelection?.provider
+    // Keep standalone SystemPrompt compositions working; a known non-Gemini
+    // or withdrawn route must not inherit the saved Gemini override.
     const enabled = routeConfigOf(config.routes.get(), provider).localizePrompt
+      && isGeminiProvider(ctx, provider) !== false
     const presentation = await next()
     if (!enabled) {
       notice?.remember(context, provider, undefined, null)

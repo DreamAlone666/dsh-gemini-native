@@ -271,6 +271,74 @@ test('functionResponse ID is stripped when the original Gemini functionCall had 
   assert.ok(!Object.hasOwn(out.body.contents[2].parts[0].functionResponse, 'id'))
 })
 
+test('incremental prefixes keep the legacy JSON bytes across v1/v2 and multimodal tool turns', () => {
+  const image = { inlineData: { data: 'iVBORw0KGgo=', mimeType: 'image/png' } }
+  const opening = { role: 'user', parts: [
+    { text: '对照 "原样" 🧪\r\n' }, image,
+    { fileData: { fileUri: 'https://example.org/reference.pdf', mimeType: 'application/pdf' } },
+  ] }
+  const [, wireCall, wireResult] = wireBody(blocks, [image]).contents
+  const [resultPart] = wireResult.parts
+  const alignedResult = { ...wireResult, parts: [{ functionResponse: { ...resultPart.functionResponse, id: 'wire-read-9' } }] }
+  const text = '续轮内容 😀\n'.repeat(64)
+  const followBlocks = [{ type: 'text', text }]
+  const followParts = [{ opaque: { z: 1, a: null }, text, thoughtSignature: 'follow-sig' }]
+  const follow = { role: 'model', parts: [{ text }] }
+  const tail = { role: 'user', parts: [{ text: 'Tail with an unpaired surrogate: \ud800' }] }
+  const contents = [opening, wireCall, wireResult, follow, tail]
+  const expected = [opening, { ...wireCall, parts }, alignedResult, { ...follow, parts: followParts }, tail]
+
+  for (const instruction of [
+    { systemParts: [] },
+    { systemInstruction: '系统 "指令" 🎵', systemParts: [{ text: '系统 "指令" 🎵' }] },
+    { systemInstruction: { parts: [{ text: '首段\n' }, { text: '次段 🎵', tag: { b: false, a: 1 } }] } },
+  ]) {
+    const { systemInstruction, systemParts = systemInstruction.parts } = instruction
+    const legacy = { response: { ...v1.response, prefix: historyFingerprint([opening], systemParts) } }
+    const native = makeNativeReplayData(route, model, [[selected(followParts)]], [], 'complete',
+      historyFingerprint(expected.slice(0, 3), systemParts), followBlocks)
+    assert.ok(native.refs.length > 0, 'the second turn must decode compact v2 references')
+    const embedded = attachNativeReplay({ response: { kind: 'pi-ai', version: 2 } }, native)
+    const request = { provider: 'gemini', model, messages: [message(clone(legacy)), message(clone(embedded), followBlocks)] }
+    const output = patchGenerateContentBody({ contents, systemInstruction }, request, route)
+    assert.equal(output.totalModelTurns, 2)
+    assert.equal(output.replayedModelTurns, 2, 'the second prefix must include the aligned tool response')
+    assert.equal(JSON.stringify(output.body.contents), JSON.stringify(expected))
+    assert.equal(output.prefix, historyFingerprint(expected, systemParts))
+    assert.equal(patchGenerateContentBody({ contents: [], systemInstruction }, request, route).prefix, historyFingerprint([], systemParts))
+  }
+})
+
+test('prefix index recovers after a miss and keeps the first valid candidate after the cursor', () => {
+  const user = text => ({ role: 'user', parts: [{ text }] })
+  const assistant = (text, signature) => ({ role: 'model', parts: [{ text, ...signature && { thoughtSignature: signature } }] })
+  const record = (turn, digest) => message(makeReplayState(route, model, [[selected(turn.parts)]], [], 'complete', digest),
+    [{ type: 'text', text: turn.parts[0].text }])
+  const contents = [user('changed opening'), assistant('miss'), user('then resume'), assistant('hit'), user('next'), assistant('continues')]
+  const expected = [...contents]
+  expected[3] = assistant('hit', 'first-valid')
+  expected[5] = assistant('continues', 'after-cursor')
+  const resumePrefix = historyFingerprint(expected.slice(0, 3))
+  const nextPrefix = historyFingerprint(expected.slice(0, 5))
+  const wrongCallCount = message({ response: { ...v1.response, prefix: resumePrefix } })
+  const badFrame = record(assistant('hit', 'bad-frame'), resumePrefix)
+  badFrame.source.replayState.response.frames = [null]
+  const out = patchGenerateContentBody({ contents }, { provider: 'gemini', model, messages: [
+    record(assistant('miss', 'stale'), historyFingerprint([user('old opening')])),
+    record(assistant('continues', 'before-cursor'), nextPrefix),
+    wrongCallCount,
+    badFrame,
+    record(expected[3], resumePrefix),
+    record(assistant('hit', 'later-match'), resumePrefix),
+    record(expected[5], nextPrefix),
+  ] }, route)
+  assert.equal(out.totalModelTurns, 3)
+  assert.equal(out.replayedModelTurns, 2)
+  assert.strictEqual(out.body.contents[1], contents[1], 'a prefix miss does not modify the normalized turn')
+  assert.equal(JSON.stringify(out.body.contents), JSON.stringify(expected))
+  assert.equal(out.prefix, historyFingerprint(expected))
+})
+
 test('patchGenerateContentBody aligns compaction requests with native history and rejects other auxiliary purposes', () => {
   const embedded = attachNativeReplay(
     { response: { kind: 'pi-ai', version: 2, api: 'google-generative-ai', provider: 'gemini', model, stopReason: 'toolUse' }, blocks: [] },
@@ -304,7 +372,7 @@ test('patchGenerateContentBody aligns compaction requests with native history an
   assert.deepEqual(compactionOut.body.tools, [{ functionDeclarations: [{ name: 'read_mock' }] }, { googleSearch: {} }])
   assert.equal(compactionOut.body.toolConfig.includeServerSideToolInvocations, true)
 
-  // Other auxiliary purposes (such as session-title) must still be refused by nativeHistory().
+  // Other auxiliary purposes (such as session-title) must not replay history.
   const titleOut = patchGenerateContentBody(
     mainBody,
     { ...mainReq, purpose: 'session-title' },

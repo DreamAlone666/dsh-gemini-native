@@ -1,11 +1,12 @@
 {
-  "name": "dsh-gemini-enhancement",
-  "version": "0.3.0",
+  "name": "dsh-gemini-native",
+  "version": "0.4.0",
   "private": true,
-  "description": "Per-provider Gemini API enhancements for DeepSeek Harness: Simplified Chinese system prompt localization, native history replay, and native Google Search.",
+  "description": "Native Gemini API features for DeepSeek Harness: history replay, Google Search, XHigh, and Simplified Chinese system prompts.",
   "license": "MIT",
   "type": "module",
   "engines": {
+    "node": ">=24.9.0",
     "dsh": ">=0.2.2-rc.2 <0.3.0"
   },
   "exports": {
@@ -37,7 +38,8 @@
     "@deepseek-ai/schemastery": "~3.19.0"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:integration": "node -e \"if (!process.env.DSH_INSTALL_DIR) throw new Error('Set DSH_INSTALL_DIR to the installed @deepseek-ai/dsh package directory')\" && node --test"
   },
   "dsh": {
     "bundle": {

@@ -9,11 +9,14 @@ import * as plugin from '../index.js'
 import { webSearchScope } from '../web-search-scope.js'
 
 const installed = process.env.DSH_INSTALL_DIR
+const bundleId = 'dsh-gemini-native'
 
 function makeHarness(initialRoutes = {}) {
   let routes = initialRoutes
+  const profiles = Object.fromEntries(Object.keys(routes).map(id => [id, { api: 'google-generative-ai' }]))
   const ctxHandlers = new Map()
   const childHandlers = new Map()
+  const piAiHandlers = new Map()
   const cleanups = []
   const agents = []
   let hasGlobalWebSearch = true
@@ -72,7 +75,27 @@ function makeHarness(initialRoutes = {}) {
     },
   }
 
+  const llm = {
+    listProviders: () => Object.keys(profiles).map(id => ({ id })),
+    listConfigurableProviders: () => Object.keys(profiles).map(provider => ({
+      provider, settingsNs: 'llm-pi-ai', declared: provider !== 'google',
+    })),
+  }
+  const loader = { *entries() {
+    yield {
+      options: { id: 'llm-pi-ai' },
+      moduleNamespace: { name: 'llm-pi-ai' },
+      fiber: {
+        uid: 1,
+        effectiveConfig: { providers: { get: () => profiles } },
+        ctx: { on: (event, fn) => register(piAiHandlers, event, fn) },
+      },
+    }
+  } }
   const child = {
+    llm,
+    loader,
+    get: name => ({ llm, loader })[name],
     agents: {
       list: () => [...agents],
       get: id => agents.find(a => a.id === id || a.session.id === id),
@@ -104,7 +127,9 @@ function makeHarness(initialRoutes = {}) {
     },
     emit: (event, ...args) => emitOn(childHandlers, event, ...args),
     emitCtx: (event, ...args) => emitOn(ctxHandlers, event, ...args),
+    emitPiAiUpdate: () => emitOn(piAiHandlers, 'loader/volatile-update'),
     setRoutes: next => { routes = next },
+    setProviderProfile: (id, profile) => { profiles[id] = profile },
     setHasGlobalWebSearch: value => { hasGlobalWebSearch = value },
     setRestrictThrows: value => { restrictThrows = value },
     dispose: () => {
@@ -156,6 +181,16 @@ test('webSearchScope syncs live agents, lifecycle events, re-entrancy, volatile 
 
   // tools/change re-entrancy safety (must not double-restrict)
   h.emit('tools/change')
+  assert.equal(liveA.restrictedCount(), 1)
+  assert.equal(createdC.restrictedCount(), 1)
+
+  // Same provider stays selected; a volatile edit on the pi-ai fiber lifts the restriction.
+  h.setProviderProfile('geminiSearch', { api: 'openai-completions' })
+  h.emitPiAiUpdate()
+  assert.equal(liveA.isRestricted(), false)
+  assert.equal(createdC.isRestricted(), false)
+  h.setProviderProfile('geminiSearch', { api: 'google-generative-ai' })
+  h.emitPiAiUpdate()
   assert.equal(liveA.restrictedCount(), 1)
   assert.equal(createdC.restrictedCount(), 1)
 
@@ -219,7 +254,7 @@ test('webSearchScope safely no-ops when web_search is absent or own-layer, and d
   h.dispose()
 })
 
-test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool:web_search, and run_code, and restores it live across model switches, Loader volatile updates, and disable',
+test('installed DSH PTC: switching the same provider protocol and removing it restore web_search',
   { skip: !installed, timeout: 12000 }, async t => {
     const req = createRequire(join(installed, 'package.json'))
     const load = spec => import(pathToFileURL(req.resolve(`@deepseek-ai/${spec}`)).href)
@@ -227,10 +262,10 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     const { Loader } = await load('cordis-plugin-loader')
     const { createUserMessage } = await load('dsh-llm')
     const pi = await load('dsh-llm-pi-ai')
-    const { AgentRegistry } = await load('dsh-agent')
+    const { AgentRegistry, assembleContextFor } = await load('dsh-agent')
     const { AgentLoop } = await load('dsh-agent-loop')
     const { ToolsService } = await load('dsh-tools')
-    const { SystemPrompt } = await load('dsh-system-prompt')
+    const { SystemPrompt, renderPrompt } = await load('dsh-system-prompt')
     const { SessionStore } = await load('dsh-session')
     const { SessionProjectionRegistry } = await load('dsh-session-projection')
     const persistence = await load('dsh-session-persistence-jsonl')
@@ -238,7 +273,7 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     const toolWeb = await load('dsh-tool-web')
     const ptcExecutor = await load('dsh-tool-executor-ptc')
 
-    const tempDir = await mkdtemp(join(tmpdir(), 'dsh-gemini-ptc-'))
+    const tempDir = await mkdtemp(join(tmpdir(), 'dsh-gemini-native-ptc-'))
     const originalFetch = globalThis.fetch
     const fibers = []
     let loader
@@ -307,7 +342,7 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     loader = ctx.plugin(class extends Loader { commit() {} }, { baseUrl: pathToFileURL(configPath).href })
     await loader
     ctx.loader.builtins.pi = pi
-    ctx.loader.builtins.enhancer = plugin
+    ctx.loader.builtins[bundleId] = plugin
 
     ctx.provide('credentials', { async resolve(ref) { return { value: `mock-${ref}` } }, async readRecord() {} })
     ctx.provide('workingDirectory', {
@@ -409,8 +444,8 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     })
 
     await ctx.loader.create({
-      id: 'enhancer',
-      name: 'cordis:enhancer',
+      id: bundleId,
+      name: `cordis:${bundleId}`,
       config: {
         routes: {
           gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true },
@@ -466,7 +501,7 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     agent.model.select({ provider: 'gemini', model: 'gemini-4-hydrogen' })
     assert.equal(ctx.tools.get('web_search', agent), undefined)
 
-    await ctx.loader.update('enhancer', {
+    await ctx.loader.update(bundleId, {
       config: {
         routes: {
           gemini: { localizePrompt: false, nativeHistory: false, googleSearch: false },
@@ -485,17 +520,50 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     assert.match(sys5, /\bweb_search\b/)
     assert.equal(req5.tools.some(tool => Object.hasOwn(tool, 'googleSearch')), false)
 
-    // Re-enable googleSearch: true via volatile update, then disable plugin entry and verify restoration
-    await ctx.loader.update('enhancer', {
-      config: {
-        routes: {
-          gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true },
-        },
-      },
+    // Keep the same agent and route id while the pi-ai profile changes API.
+    await ctx.loader.update(bundleId, {
+      config: { routes: { gemini: { localizePrompt: true, nativeHistory: false, googleSearch: true } } },
     })
     assert.equal(ctx.tools.get('web_search', agent), undefined)
+    const signal = new AbortController().signal
+    const selection = agent.model.current()
+    const promptContext = { ...assembleContextFor(agent, signal), modelSelection: selection }
+    assert.match(renderPrompt(await ctx.systemPrompt.assemble(promptContext)), /你是由 DeepSeek Harness/u)
 
-    await ctx.loader.update('enhancer', {
+    const { providers } = ctx.loader.resolve('llm-pi-ai').options.config
+    await ctx.loader.update('llm-pi-ai', { config: { providers: {
+      ...providers, gemini: { ...providers.gemini, api: 'openai-completions' },
+    } } })
+    assert.equal(agent.model.current().provider, selection.provider)
+    assert.ok(ctx.tools.get('web_search', agent))
+    const toolSet = await ctx.tools.resolve({ agent, modelSelection: selection, signal })
+    try {
+      const prompt = renderPrompt(await ctx.systemPrompt.assemble({ ...promptContext, toolSet }))
+      assert.match(prompt, /You are an AI agent powered by DeepSeek Harness/u)
+      assert.match(prompt, /\bweb_search\b/u)
+      const restored = await ctx.tools.execute({ agent, signal, toolSet, calls: [{
+        type: 'tool-call', id: 'call-ptc-protocol-change', name: 'run_code',
+        arguments: JSON.stringify({
+          description: 'Call local search on the same non-Gemini route',
+          code: 'return await tools.web_search({ queries: ["same route"] });',
+        }),
+      }] })
+      assert.equal(restored.results[0].result.isError, false)
+      assert.equal(dshSearchCalls, 2)
+      assert.equal(requests.length, 5, 'the protocol edit and PTC call have no model I/O')
+    } finally {
+      toolSet.dispose()
+    }
+
+    await ctx.loader.update('llm-pi-ai', { config: { providers } })
+    assert.equal(ctx.tools.get('web_search', agent), undefined)
+    await ctx.loader.update('llm-pi-ai', { config: { providers: { plain: providers.plain } } })
+    assert.ok(ctx.tools.get('web_search', agent), 'withdrawing the route also removes the plugin restriction')
+    await ctx.loader.update('llm-pi-ai', { config: { providers } })
+    assert.equal(ctx.tools.get('web_search', agent), undefined)
+
+    // Disabling the plugin restores web_search when the Gemini route still exists.
+    await ctx.loader.update(bundleId, {
       config: {
         routes: {
           gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true },
@@ -506,7 +574,7 @@ test('installed DSH PTC mode: googleSearch hides web_search from tools:sdk, tool
     assert.ok(ctx.tools.get('web_search', agent))
 
     // Re-enable plugin and verify defense-in-depth tools/pre-execute blocks an agent.ctx-local web_search
-    await ctx.loader.update('enhancer', {
+    await ctx.loader.update(bundleId, {
       config: {
         routes: {
           gemini: { localizePrompt: false, nativeHistory: false, googleSearch: true },

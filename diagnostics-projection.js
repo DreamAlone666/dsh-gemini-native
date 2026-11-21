@@ -1,7 +1,7 @@
-import { collectGoogleSearchEvidence } from './google-search-sse.js'
-import { hasNativeReplay, isObject, nativeReplayOf, selectedCandidate } from './generate-content.js'
+import { hasNativeReplay, isObject, nativeReplayBytes } from './generate-content.js'
+import { summarizeNativeEvent } from './native-search-projection.js'
 
-export const diagnosticsProjectionKey = 'geminiEnhancementDiagnostics'
+export const diagnosticsProjectionKey = 'geminiNativeDiagnostics'
 
 const localizedSystemMarkers = [
   '你是由 DeepSeek Harness 驱动的 AI 智能体。',
@@ -37,35 +37,19 @@ const isNonNegativeInt = value => Number.isSafeInteger(value) && value >= 0
 const isNullableString = value => value === null || typeof value === 'string'
 const isNullableBoolean = value => value === null || typeof value === 'boolean'
 
-const stateKeys = [
-  'assistantSteps',
-  'nativeSteps',
-  'consecutiveNative',
-  'hasNativePayload',
-  'nativeBytes',
-  'lastNativeRoute',
-  'lastNativeModel',
-  'lastNativeOutcome',
-  'searchCards',
-  'searchQueries',
-  'searchSources',
-  'systems',
-  'promptLocalizedInLog',
-]
-
 const viewKeys = [
   'assistantSteps',
   'nativeSteps',
   'consecutiveNative',
   'hasNativePayload',
   'nativeBytes',
-  'lastNativeModel',
-  'lastNativeOutcome',
   'searchCards',
   'searchQueries',
   'searchSources',
   'promptLocalizedInLog',
 ]
+
+const stateKeys = [...viewKeys, 'lastNativeRoute', 'lastNativeModel', 'systems']
 
 function hasExactKeys(value, keys) {
   return Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
@@ -77,8 +61,6 @@ function parseSharedCounters(value, label) {
     || !isNonNegativeInt(value.consecutiveNative)
     || typeof value.hasNativePayload !== 'boolean'
     || !isNonNegativeInt(value.nativeBytes)
-    || !isNullableString(value.lastNativeModel)
-    || !isNullableString(value.lastNativeOutcome)
     || !isNonNegativeInt(value.searchCards)
     || !isNonNegativeInt(value.searchQueries)
     || !isNonNegativeInt(value.searchSources)
@@ -89,11 +71,11 @@ function parseSharedCounters(value, label) {
 
 function parseState(value) {
   if (!isObject(value) || !hasExactKeys(value, stateKeys)) {
-    throw new TypeError('Expected Gemini enhancement diagnostics state')
+    throw new TypeError('Expected Gemini Native diagnostics state')
   }
-  parseSharedCounters(value, 'Gemini enhancement diagnostics state')
-  if (!isNullableString(value.lastNativeRoute) || !Array.isArray(value.systems)) {
-    throw new TypeError('Invalid Gemini enhancement diagnostics state')
+  parseSharedCounters(value, 'Gemini Native diagnostics state')
+  if (!isNullableString(value.lastNativeRoute) || !isNullableString(value.lastNativeModel) || !Array.isArray(value.systems)) {
+    throw new TypeError('Invalid Gemini Native diagnostics state')
   }
   for (const item of value.systems) {
     if (!isObject(item)
@@ -102,7 +84,7 @@ function parseState(value) {
       || !Object.hasOwn(item, 'localized')
       || !isNonNegativeInt(item.seq)
       || !isNullableBoolean(item.localized)) {
-      throw new TypeError('Invalid Gemini enhancement diagnostics system entry')
+      throw new TypeError('Invalid Gemini Native diagnostics system entry')
     }
   }
   return value
@@ -110,9 +92,9 @@ function parseState(value) {
 
 function parseView(value) {
   if (!isObject(value) || !hasExactKeys(value, viewKeys)) {
-    throw new TypeError('Expected Gemini enhancement diagnostics view')
+    throw new TypeError('Expected Gemini Native diagnostics view')
   }
-  parseSharedCounters(value, 'Gemini enhancement diagnostics view')
+  parseSharedCounters(value, 'Gemini Native diagnostics view')
   return value
 }
 
@@ -165,23 +147,6 @@ function applySystemSurface(state, event) {
   return state
 }
 
-function measureNativeBytes(event, native) {
-  const response = event.data?.message?.source?.replayState?.response
-  const target = response?.dshGeminiNative ?? response
-  if (target !== undefined) {
-    try {
-      const serialized = JSON.stringify(target)
-      if (typeof serialized === 'string') return Buffer.byteLength(serialized)
-    } catch { /* Fall back to decoded native payload. */ }
-  }
-  try {
-    const serialized = JSON.stringify(native)
-    return typeof serialized === 'string' ? Buffer.byteLength(serialized) : 0
-  } catch {
-    return 0
-  }
-}
-
 const viewCache = new WeakMap()
 
 export const diagnosticsProjection = {
@@ -196,7 +161,6 @@ export const diagnosticsProjection = {
     nativeBytes: 0,
     lastNativeRoute: null,
     lastNativeModel: null,
-    lastNativeOutcome: null,
     searchCards: 0,
     searchQueries: 0,
     searchSources: 0,
@@ -215,7 +179,7 @@ export const diagnosticsProjection = {
     if (event.type !== 'assistant/message') return afterSurface
     if (!isObject(event.data) || !isObject(event.data.message)) return afterSurface
     const hasNative = hasNativeReplay(event)
-    const native = nativeReplayOf(event)
+    const native = summarizeNativeEvent(event)
     const assistantSteps = afterSurface.assistantSteps + 1
     if (!native) {
       return {
@@ -228,19 +192,16 @@ export const diagnosticsProjection = {
     const sameChain = afterSurface.consecutiveNative > 0
       && afterSurface.lastNativeRoute === native.route
       && afterSurface.lastNativeModel === native.model
-    let card
-    const observe = collectGoogleSearchEvidence(value => { card = value })
-    for (const frame of native.frames) observe({ candidates: [selectedCandidate(frame)] })
+    const { card } = native
     return {
       ...afterSurface,
       assistantSteps,
       nativeSteps: afterSurface.nativeSteps + 1,
       consecutiveNative: sameChain ? afterSurface.consecutiveNative + 1 : 1,
       hasNativePayload: true,
-      nativeBytes: afterSurface.nativeBytes + measureNativeBytes(event, native),
+      nativeBytes: afterSurface.nativeBytes + nativeReplayBytes(event),
       lastNativeRoute: typeof native.route === 'string' ? native.route : null,
       lastNativeModel: typeof native.model === 'string' ? native.model : null,
-      lastNativeOutcome: typeof native.outcome === 'string' ? native.outcome : null,
       searchCards: afterSurface.searchCards + (card ? 1 : 0),
       searchQueries: afterSurface.searchQueries + (card ? card.queries.length : 0),
       searchSources: afterSurface.searchSources + (card ? card.sources.length : 0),
@@ -258,8 +219,6 @@ export const diagnosticsProjection = {
         consecutiveNative: state.consecutiveNative,
         hasNativePayload: state.hasNativePayload,
         nativeBytes: state.nativeBytes,
-        lastNativeModel: state.lastNativeModel,
-        lastNativeOutcome: state.lastNativeOutcome,
         searchCards: state.searchCards,
         searchQueries: state.searchQueries,
         searchSources: state.searchSources,

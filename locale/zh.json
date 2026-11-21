@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Gemini 增强",
-    "description": "在「设置 → 模型」的 Gemini API 供应商卡片中按供应商就地配置增强能力：系统提示词汉化、Gemini 原生历史回放与 Google 原生搜索（替换内置 web_search）。全部选项默认关闭，不更改模型路由，也不另发请求。"
+    "title": "Gemini Native",
+    "description": "在 DeepSeek Harness 中使用 Gemini 原生历史回放、Google 搜索、XHigh 和简体中文系统提示词。在「设置 → 模型」中按 Gemini API 供应商配置。原生回放和状态提示默认开启，搜索和汉化需手动开启。回放会把额外的响应数据写入会话日志。"
   }
 }

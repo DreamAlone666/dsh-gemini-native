@@ -13,7 +13,7 @@ const routeId = 'offline-gemini-relay'
 const model = 'gemini-4-hydrogen'
 const baseURL = 'https://model-page.test/v1beta'
 const reference = 'OFFLINE_GEMINI_RELAY_API_KEY'
-const enhancer = 'dsh-gemini-enhancement'
+const geminiNative = 'dsh-gemini-native'
 const tools = ['read_mock', 'web_search'].map(name => ({ name, description: name, parameters: { type: 'object' } }))
 
 test('real Models settings mutate the same provider to and from Gemini, reusing pi-ai for files, custom headers, and streaming',
@@ -45,9 +45,9 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     await loader
     await system
     ctx.loader.builtins.pi = pi
-    ctx.loader.builtins.enhancer = plugin
+    ctx.loader.builtins.geminiNative = plugin
     ctx.provide('profileContext', { home: root })
-    const entryIds = ['llm-pi-ai', enhancer]
+    const entryIds = ['llm-pi-ai', geminiNative]
     const entries = () => entryIds.flatMap(id => { try { return [ctx.loader.resolve(id)] } catch { return [] } })
     ctx.provide('configEditor', {
       entries,
@@ -66,7 +66,7 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
       [routeId]: { api: 'openai-completions', baseURL, apiKeyEnv: reference, headers: { 'x-relay-tag': 'pi-ai-owned' }, models: [{ id: model }] },
       'second-gemini-relay': { api: 'google-generative-ai', baseURL, apiKeyEnv: reference, models: [{ id: model }] },
     } } })
-    await ctx.loader.create({ id: enhancer, name: 'cordis:enhancer', config: {} })
+    await ctx.loader.create({ id: geminiNative, name: 'cordis:geminiNative', config: {} })
     await ctx.loader.await()
     const route = () => ctx.settings.describe({ redactSecrets: true }).find(row => row.ns === 'llm-pi-ai')
     const modelCatalog = () => ctx.llm.listModels(routeId).then(models => models.map(entry => entry.id))
@@ -75,7 +75,7 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
       await ctx.settings.mutate(ns, ops, form.revision)
     }
     const setApi = value => mutate('llm-pi-ai', [{ op: 'set', path: ['providers', routeId, 'api'], value }])
-    const setRoute = value => mutate(enhancer, value
+    const setRoute = value => mutate(geminiNative, value
       ? [{ op: 'set', path: ['routes', routeId], value }]
       : [{ op: 'unset', path: ['routes', routeId] }])
     assert.equal(route().value.providers[routeId].api, 'openai-completions')
@@ -110,7 +110,8 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
 
     await setApi('google-generative-ai')
     const originalRoute = route().value.providers[routeId]
-    assert.ok(!isNative(await finish(await prepare())), 'plain Gemini API does not opt in to the plugin')
+    assert.ok(isNative(await finish(await prepare())), 'Gemini records native parts by default')
+    assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     await setRoute({ localizePrompt: true, nativeHistory: true, googleSearch: true })
     assert.deepEqual(route().value.providers[routeId], originalRoute)
     const beforePreparing = requests.length
@@ -124,7 +125,7 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     assert.equal(requests.at(-1).headers.get('x-goog-api-key'), 'offline-models-key')
     assert.equal(requests.at(-1).headers.get('x-relay-tag'), 'pi-ai-owned', 'custom headers stay handled by pi-ai')
     assert.deepEqual(requests.at(-1).body.tools.map(tool => tool.functionDeclarations?.map(fn => fn.name) ?? 'Google Search'), [['read_mock'], 'Google Search'])
-    assert.ok(!isNative(await finish(await prepare({}, { provider: 'second-gemini-relay' }))))
+    assert.ok(isNative(await finish(await prepare({}, { provider: 'second-gemini-relay' }))))
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.ok(!isNative(await finish(await prepare())))
     assert.match(requests.at(-1).path, /chat\/completions$/u)
@@ -162,9 +163,9 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     assert.deepEqual(requests.at(-1).body.tools.map(tool => tool.functionDeclarations?.map(fn => fn.name) ?? 'Google Search'), [['read_mock'], 'Google Search'])
     assert.equal(requests.at(-1).body.toolConfig.includeServerSideToolInvocations, true)
 
-    // Unsetting the route restores normal pi-ai Gemini behavior completely.
+    // Unsetting the override restores the default replay-on, search-off posture.
     await setRoute(undefined)
-    assert.ok(!isNative(await finish(await prepare())), 'clearing route restores normal Gemini protocol')
+    assert.ok(isNative(await finish(await prepare())), 'clearing route restores default replay')
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.deepEqual(route().value.providers[routeId], originalRoute)
 

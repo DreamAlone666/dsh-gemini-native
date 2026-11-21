@@ -3,6 +3,27 @@ import { nativeReplayOf, selectedCandidate } from './generate-content.js'
 
 export const nativeSearchProjectionKey = 'geminiNativeSearchActivity'
 
+// Both projections fold the same immutable Session event. Share the small
+// summary, not the reconstructed frames or normalized message content.
+const nativeSummaries = new WeakMap()
+
+export function summarizeNativeEvent(event) {
+  if (event.type !== 'assistant/message' && event.type !== 'assistant/attempt') return
+  if (nativeSummaries.has(event)) return nativeSummaries.get(event)
+  const native = nativeReplayOf(event)
+  let summary
+  if (native) {
+    let card
+    const observe = collectGoogleSearchEvidence(value => {
+      card = value.status === 'running' ? { ...value, status: 'incomplete' } : value
+    })
+    for (const frame of native.frames) observe({ candidates: [selectedCandidate(frame)] })
+    summary = { route: native.route, model: native.model, card }
+  }
+  nativeSummaries.set(event, summary)
+  return summary
+}
+
 function cardsSchema(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Expected Gemini turn summaries')
   for (const [turn, cards] of Object.entries(value)) {
@@ -26,15 +47,10 @@ export const nativeSearchProjection = {
   stateSchema: schema,
   init: () => ({}),
   apply(state, event) {
-    const native = nativeReplayOf(event)
-    if (!native) return state
-    const { turn } = event.data
+    const turn = event.data?.turn
     if (!Number.isSafeInteger(turn) || turn < 1) return state
-    let card
-    const observe = collectGoogleSearchEvidence(value => { card = value })
-    for (const frame of native.frames) observe({ candidates: [selectedCandidate(frame)] })
+    const card = summarizeNativeEvent(event)?.card
     if (!card) return state
-    if (card.status === 'running') card.status = 'incomplete'
     // Bound each card and each turn, not the number of historical turns.
     return { ...state, [turn]: [...(state[turn] ?? []), card].slice(-12) }
   },

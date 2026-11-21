@@ -1,2 +1,17 @@
 node_modules/
 *.tgz
+
+# Local DSH profiles, exported sessions and debug traces
+.dsh/
+*.jsonl
+*.jsonl.gz
+*.log
+*.har
+
+# Local credentials and registry settings
+.env
+.env.*
+!.env.example
+.npmrc
+*.pem
+*.key

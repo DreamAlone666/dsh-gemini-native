@@ -89,12 +89,15 @@ test('validates route config schema and keeps fields editable by DSH Settings', 
   assert.equal(plugin.Config.dict.showStatusNotice.meta.volatile, true)
   const defaults = plugin.Config({})
   assert.deepEqual(defaults.routes.get(), {})
-  assert.equal(defaults.showStatusNotice.get(), false)
+  assert.equal(defaults.showStatusNotice.get(), true)
   assert.deepEqual(plugin.routeConfigOf(defaults.routes.get(), 'google'), {
     localizePrompt: false,
-    nativeHistory: false,
+    nativeHistory: true,
     googleSearch: false,
   })
+  const configured = plugin.Config({ routes: { google: {}, disabled: { nativeHistory: false } } })
+  assert.equal(configured.routes.get().google.nativeHistory, true)
+  assert.equal(plugin.routeConfigOf(configured.routes.get(), 'disabled').nativeHistory, false)
 })
 
 const installed = process.env.DSH_INSTALL_DIR
@@ -108,7 +111,8 @@ test('installed DSH: mount from bundle patch, render, update per-provider routes
   const { default: yaml } = await load('js-yaml')
   const [patch] = yaml.load(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'))
   const [row] = patch.insert
-  assert.equal(row.id, 'dsh-gemini-enhancement')
+  assert.equal(row.id, 'dsh-gemini-native')
+  assert.equal(row.name, 'dsh-gemini-native')
   const module = await import(row.name) // Resolve via the package's own exports.
   const ctx = new Context()
   const system = ctx.plugin(SystemPrompt, { personaPrefix: persona })
@@ -121,7 +125,7 @@ test('installed DSH: mount from bundle patch, render, update per-provider routes
   t.after(() => mounted.dispose())
   await mounted
 
-  // Off by default on all providers.
+  // UI status is on by default, while prompt localization remains opt-in.
   assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('google', 'gemini-4-argon'))), /^You are/u)
 
   // Use the real Settings service and an in-memory ConfigEditor so this
@@ -143,17 +147,17 @@ test('installed DSH: mount from bundle patch, render, update per-provider routes
   await settings
   const [form] = ctx.settings.describe()
   assert.equal(form.ns, row.id)
-  assert.deepEqual(form.value, { routes: {}, showStatusNotice: false })
+  assert.deepEqual(form.value, { routes: {}, showStatusNotice: true })
 
   const enableOps = [
     { op: 'set', path: ['routes', 'gemini-relay'], value: { localizePrompt: true, nativeHistory: true, googleSearch: false } },
-    { op: 'set', path: ['showStatusNotice'], value: true },
+    { op: 'set', path: ['showStatusNotice'], value: false },
   ]
   await ctx.settings.mutate(row.id, enableOps, form.revision)
   const afterEnable = ctx.settings.describe()[0]
   assert.deepEqual(afterEnable.value, {
     routes: { 'gemini-relay': { localizePrompt: true, nativeHistory: true, googleSearch: false } },
-    showStatusNotice: true,
+    showStatusNotice: false,
   })
   await assert.rejects(ctx.settings.mutate(row.id, enableOps, form.revision), /revision/i)
 
@@ -169,7 +173,7 @@ test('installed DSH: mount from bundle patch, render, update per-provider routes
 
   // Clearing a route via unset restores default English prompt cleanly.
   await ctx.settings.mutate(row.id, [{ op: 'unset', path: ['routes', 'gemini-relay'] }], afterEnable.revision)
-  assert.deepEqual(ctx.settings.describe()[0].value, { routes: {}, showStatusNotice: true })
+  assert.deepEqual(ctx.settings.describe()[0].value, { routes: {}, showStatusNotice: false })
   assert.match(renderPrompt(await ctx.systemPrompt.assemble(selection('gemini-relay', 'gemini-4-argon'))), /^You are/u)
 
   // Re-enable then unload plugin to verify disposal cleans up listeners.

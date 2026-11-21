@@ -109,7 +109,7 @@ test('applyXHighThinking merges generationConfig, strips thinkingBudget, is idem
   }
 })
 
-function stateFixture({ kv } = {}) {
+function stateFixture({ kv, sessionController } = {}) {
   const listeners = new Map()
   const cleanups = []
   let registeredRoute
@@ -134,6 +134,9 @@ function stateFixture({ kv } = {}) {
           effect(start) { cleanups.push(start()) },
         })
       }
+      if (sessionController && deps.includes('sessionController')) {
+        fn({ sessionController, effect(start) { cleanups.push(start()) } })
+      }
       if (kv && deps.includes('storage') && deps.includes('storage.backend.json')) {
         const backend = { kv }
         fn({
@@ -153,7 +156,7 @@ function stateFixture({ kv } = {}) {
   return { state, route: () => registeredRoute, emit, unload }
 }
 
-function memoryKvBackend(initial = {}) {
+function memoryKvBackend(initial = {}, { beforeLoad } = {}) {
   const records = new Map(Object.entries(initial))
   let openCount = 0
   return {
@@ -170,6 +173,7 @@ function memoryKvBackend(initial = {}) {
         let closed = false
         return {
           async loadAll() {
+            await beforeLoad
             return { tables: { sessions: Object.fromEntries(records) }, global: null }
           },
           async putRecord(table, key, value) {
@@ -335,6 +339,59 @@ test('xhighState persists across reloads via storage kv backend and removes entr
   assert.equal(backend.openCount, 0)
 })
 
+test('a fork waits for XHigh hydration and respects a later child decision or plugin unload', async t => {
+  const hydration = Promise.withResolvers()
+  const backend = memoryKvBackend({ source: { enabled: true, updatedAt: 1 } }, { beforeLoad: hydration.promise })
+  let called = 0
+  const controller = {
+    async fork(request, gate) {
+      assert.equal(this, controller)
+      assert.equal(request.sessionId, 'source')
+      called++
+      gate.entered.resolve()
+      return gate.result.promise
+    },
+  }
+  const original = controller.fork
+  const fixture = stateFixture({ kv: backend.kv, sessionController: controller })
+  t.after(async () => { hydration.resolve(); await fixture.unload() })
+  const begin = () => {
+    const entered = Promise.withResolvers()
+    const result = Promise.withResolvers()
+    return { entered, result, done: controller.fork({ sessionId: 'source' }, { entered, result }) }
+  }
+
+  const hydrated = begin()
+  assert.equal(called, 0, 'do not sample state or enter fork before storage hydration')
+  hydration.resolve()
+  await hydrated.entered.promise
+  const firstChild = { sessionId: 'first' }
+  hydrated.result.resolve(firstChild)
+  assert.strictEqual(await hydrated.done, firstChild)
+  assert.equal(backend.records.get('first')?.enabled, true, 'the child is persisted before fork returns')
+
+  const contended = begin()
+  await contended.entered.promise
+  fixture.state.setEnabled('changed', false)
+  contended.result.resolve({ sessionId: 'changed' })
+  await contended.done
+  assert.equal(backend.records.has('changed'), false)
+  assert.equal(fixture.state.isEnabled('source'), true)
+
+  const rejected = begin()
+  const error = new Error('fork transaction failed')
+  rejected.result.reject(error)
+  await assert.rejects(rejected.done, actual => actual === error)
+
+  const unloaded = begin()
+  await unloaded.entered.promise
+  await fixture.unload()
+  assert.strictEqual(controller.fork, original)
+  unloaded.result.resolve({ sessionId: 'after-unload' })
+  assert.deepEqual(await unloaded.done, { sessionId: 'after-unload' })
+  assert.equal(backend.records.has('after-unload'), false)
+})
+
 function transportFixture(t, { initialRoutes = {}, xhighSessions = new Set() } = {}) {
   const handlers = new Map()
   const original = globalThis.fetch
@@ -354,8 +411,8 @@ function transportFixture(t, { initialRoutes = {}, xhighSessions = new Set() } =
     logger: { warn() {} },
     on: (event, fn) => handlers.set(event, fn),
     effect: start => { cleanup = start() },
-  }, { routes: { get: () => routes } }, plugin.routeConfigOf, (sessionId, liveOnly) => {
-    reports.push({ sessionId, liveOnly })
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, sessionId => {
+    reports.push(sessionId)
     return () => {}
   }, sessionId => xhighSessions.has(sessionId))
 
@@ -398,10 +455,10 @@ function transportFixture(t, { initialRoutes = {}, xhighSessions = new Set() } =
 }
 
 test('geminiTransport applies XHigh alone, with googleSearch, and with nativeHistory, while skipping unsupported models and non-loop calls', async t => {
-  const f = transportFixture(t, { initialRoutes: {}, xhighSessions: new Set(['sess-1']) })
+  const f = transportFixture(t, { initialRoutes: { mock: { nativeHistory: false } }, xhighSessions: new Set(['sess-1']) })
   t.after(f.cleanup)
 
-  // 1. XHigh alone with empty routes works on neon and hydrogen without triggering googleSearch or reportFor.
+  // 1. XHigh alone works on neon and hydrogen without triggering googleSearch or reportFor.
   const neonOnly = await f.run({
     model: neon,
     body: {
@@ -438,7 +495,7 @@ test('geminiTransport applies XHigh alone, with googleSearch, and with nativeHis
     thinkingConfig: { includeThoughts: true, thinkingLevel: 'XHIGH' },
   })
   assert.equal(withSearch.body.tools.some(tool => Object.hasOwn(tool, 'googleSearch')), true)
-  assert.deepEqual(f.reports, [{ sessionId: 'sess-1', liveOnly: false }])
+  assert.deepEqual(f.reports, ['sess-1'])
 
   // When googleSearch cannot inject (mode AUTO), XHigh still applies and reportFor is not called.
   f.reports.length = 0
@@ -477,11 +534,12 @@ test('geminiTransport applies XHigh alone, with googleSearch, and with nativeHis
 
 const installed = process.env.DSH_INSTALL_DIR
 
-test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelSelection and resets on agent.model.select',
+test('installed DSH: XHigh overrides pi-ai, resets on model selection, and inherits once through the Session fork Remote',
   { skip: !installed, timeout: 10000 }, async t => {
     const require = createRequire(join(installed, 'package.json'))
     const load = spec => import(pathToFileURL(require.resolve(spec)).href)
     const { Context } = await load('@deepseek-ai/cordis')
+    const { createUserMessage } = await load('@deepseek-ai/dsh-llm')
     const { Loader } = await load('@deepseek-ai/cordis-plugin-loader')
     const { Include } = await load('@deepseek-ai/cordis-plugin-include')
     const { SessionStore } = await load('@deepseek-ai/dsh-session')
@@ -492,6 +550,13 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     const { AgentLoop } = await load('@deepseek-ai/dsh-agent-loop')
     const { Storage } = await load('@deepseek-ai/dsh-storage')
     const storageJson = await load('@deepseek-ai/dsh-storage-json')
+    const persistenceJsonl = await load('@deepseek-ai/dsh-session-persistence-jsonl')
+    const { default: SessionQueryEngine } = await load('@deepseek-ai/dsh-session-query')
+    const { SessionController } = await load('@deepseek-ai/dsh-api-session-controller')
+    const { TYPERT } = await load('@deepseek-ai/dsh-api-session-controller/typert')
+    const { default: TypertRegistry } = await load('@deepseek-ai/dsh-typert-registry')
+    const { default: TypertGateway } = await load('@deepseek-ai/dsh-api-gateway')
+    const { default: RemoteAccess } = await load('@deepseek-ai/dsh-api-remote-access')
     const pi = await load('@deepseek-ai/dsh-llm-pi-ai')
 
     const fixture = await mkdtemp(join(tmpdir(), 'dsh-xhigh-test-'))
@@ -508,10 +573,15 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     const agents = ctx.plugin(AgentRegistry)
     const tools = ctx.plugin(ToolsService)
     const system = ctx.plugin(SystemPrompt)
+    const persistence = ctx.plugin(persistenceJsonl, { root: join(fixture, 'sessions'), compression: 'none' })
+    const query = ctx.plugin(SessionQueryEngine)
+    const typert = ctx.plugin(TypertRegistry)
+    const access = ctx.plugin(RemoteAccess)
     const configUrl = pathToFileURL(configPath).href
     const loader = ctx.plugin(class extends Loader { commit() {} }, { baseUrl: configUrl })
     const routes = new Map()
     ctx.provide('connection', {
+      rpc: { intercept: () => () => {} },
       fetch: {
         register(def) {
           routes.set(def.path, def)
@@ -523,15 +593,33 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
       async resolve() { return { value: 'synthetic-key' } },
       async readRecord() {},
     })
+    ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'gemini', model: neon }) })
+    ctx.provide('attachments', {
+      imageLimits: {
+        maxImageBytes: 1000, maxImagesPerMessage: 1, maxMessageImageBytes: 1000,
+        maxImagePixels: 1000, maxImageDimension: 100, mediaTypes: ['image/png'],
+      },
+    })
+    ctx.provide('fileUploads', { registerAgentResolver: () => () => {} })
+    ctx.provide('fs', {})
+    ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [] })
 
     const originalFetch = globalThis.fetch
-    let adapter
+    let controller
+    let gateway
+    let unregisterReflection
     let loop
     t.after(async () => {
       globalThis.fetch = originalFetch
       await loop?.dispose()
       await loader.dispose()
-      await adapter?.dispose()
+      await controller?.dispose()
+      await unregisterReflection?.()
+      await gateway?.dispose()
+      await access.dispose()
+      await typert.dispose()
+      await query.dispose()
+      await persistence.dispose()
       await system.dispose()
       await tools.dispose()
       await agents.dispose()
@@ -542,17 +630,18 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
       await rm(fixture, { recursive: true, force: true })
     })
 
-    await Promise.all([storage, jsonBackend, sessions, projections, agents, tools, system, loader])
+    await Promise.all([storage, jsonBackend, sessions, projections, agents, tools, system, loader, persistence, query, typert, access])
     ctx.tools.setExecutor({
       describe: () => ({ schemas: [], knownNames: [] }),
       execute: async () => ({ results: [], additionalContexts: [], concluded: false }),
     })
     ctx.loader.builtins.include = Include
-    ctx.loader.builtins.enhancement = plugin
+    ctx.loader.builtins.geminiNative = plugin
+    ctx.loader.builtins.pi = pi
     await ctx.loader.create({ id: 'include', name: 'cordis:include', config: { path: configUrl } })
     await ctx.loader.await()
 
-    adapter = ctx.plugin(pi, {
+    await ctx.loader.create({ id: 'llm-pi-ai', name: 'cordis:pi', config: {
       providers: {
         gemini: {
           api: 'google-generative-ai',
@@ -564,11 +653,22 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
           }],
         },
       },
-    })
-    await adapter
+    } })
+    await ctx.loader.await()
 
     loop = ctx.plugin(AgentLoop, {})
-    await loop
+    gateway = ctx.plugin(TypertGateway, {})
+    await Promise.all([loop, gateway])
+    unregisterReflection = ctx.typert.register(TYPERT)
+    controller = ctx.plugin(SessionController, {})
+    await controller
+    const peer = {
+      ctx, id: 'owner', principal: { kind: 'owner' }, signal: new AbortController().signal,
+    }
+    const sessionCall = (method, request) => ctx.typertGateway.invoke({ namespace: 'session', method, args: { request }, peer })
+    const plainFork = () => Object.getOwnPropertyDescriptor(ctx.sessionController, 'fork')
+    assert.equal(plainFork(), undefined)
+    const config = { routes: { gemini: { nativeHistory: false } } }
 
     const capturedBodies = []
     globalThis.fetch = async (input, init) => {
@@ -578,19 +678,31 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
       return new Response(`data: ${JSON.stringify(reply)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     }
 
-    // Notice routes config is empty — XHigh works even without route-level enhancements enabled.
-    await ctx.loader.create({ id: 'gemini-enhancement', name: 'cordis:enhancement', config: {} })
+    // Keep this request an XHigh-only override in both plugin generations.
+    await ctx.loader.create({ id: 'gemini-native', name: 'cordis:geminiNative', config })
     await ctx.loader.await()
+    assert.equal(typeof plainFork()?.value, 'function')
 
+    const readEnabled = async sessionId => {
+      const response = routes.get(xhighPath).fetch(new Request(`http://localhost${xhighPath}?sessionId=${sessionId}`))
+      const reader = response.body.getReader()
+      try { return (await readEvent(reader)).enabled } finally { await reader.cancel() }
+    }
+    const forkFrom = sessionId => sessionCall('fork', { sessionId })
+    const postState = (sessionId, enabled) => routes.get(xhighPath).fetch(new Request(`http://localhost${xhighPath}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, enabled }),
+    }))
     const xhighRoute = routes.get(xhighPath)
-    assert.ok(xhighRoute, 'xhigh route must be registered')
-
+    assert.ok(xhighRoute)
     const sessionId = 'xhigh-integration-session'
-    const agent = await ctx.agentLoop.create(sessionId, {
+    const { agent } = await ctx.agents.create({ sessionId, meta: { cwd: fixture }, agentOptions: {
       provider: 'gemini',
       model: neon,
       reasoningEffort: 'medium',
-    })
+    } })
+    agent.model.select({ provider: 'gemini', model: neon, reasoningEffort: 'medium' })
 
     const abort = new AbortController()
     t.after(() => abort.abort())
@@ -599,11 +711,7 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     assert.deepEqual(await readEvent(reader), { enabled: false })
 
     // Turn 1: enable XHigh via HTTP POST, keeping native selection at medium.
-    const postRes = await xhighRoute.fetch(new Request(`http://localhost${xhighPath}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, enabled: true }),
-    }))
+    const postRes = await postState(sessionId, true)
     assert.equal(postRes.status, 200)
     assert.deepEqual(await postRes.json(), { enabled: true })
     assert.deepEqual(await readEvent(reader), { enabled: true })
@@ -612,7 +720,7 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     ctx.on('agent/error', ({ error }) => errors.push(error))
 
     const sendTurn = async text => {
-      agent.followup({ role: 'user', source: { kind: 'human' }, content: [{ type: 'text', text }] })
+      agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }))
       await agent.whenIdle()
       assert.deepEqual(errors, [])
     }
@@ -625,11 +733,29 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     // Native modelSelection remains 'medium'.
     assert.deepEqual(agent.model.current(), { provider: 'gemini', model: neon, reasoningEffort: 'medium' })
 
-    // Reload the plugin (simulates restart / cold reopen): persisted XHigh is restored from dsh-storage-json.
+    const { sessionId: childId } = await forkFrom(sessionId)
+    const { sessionId: persistedChildId } = await forkFrom(sessionId)
+    assert.notEqual(childId, sessionId)
+    assert.notEqual(persistedChildId, childId)
+    assert.deepEqual(ctx.agents.get(childId).model.current(), agent.model.current(), 'built-in effort is inherited too')
+    assert.equal(await readEnabled(childId), true)
+    assert.equal(await readEnabled(persistedChildId), true)
+    ctx.agents.get(childId).model.select({ provider: 'gemini', model: neon, reasoningEffort: 'low' })
+    assert.equal(await readEnabled(childId), false)
+    assert.equal(await readEnabled(sessionId), true)
+
+    const { sessionId: plainId } = await sessionCall('create', { cwd: fixture })
+    assert.equal(await readEnabled(plainId), false)
+    await ctx.agents.create({ sessionId: 'subagent-fixture', meta: { cwd: fixture, origin: 'subagent', parentSession: sessionId } })
+    assert.equal(await readEnabled('subagent-fixture'), false)
+
+    // Removing the plugin restores the original Remote and leaves storage intact.
     abort.abort()
-    await ctx.loader.remove('gemini-enhancement')
+    await ctx.loader.remove('gemini-native')
     await ctx.loader.await()
-    await ctx.loader.create({ id: 'gemini-enhancement', name: 'cordis:enhancement', config: {} })
+    assert.equal(plainFork(), undefined)
+    const { sessionId: forkWhileDisabled } = await forkFrom(sessionId)
+    await ctx.loader.create({ id: 'gemini-native', name: 'cordis:geminiNative', config })
     await ctx.loader.await()
 
     const reloadedRoute = routes.get(xhighPath)
@@ -642,6 +768,9 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     let restoredEvent = await readEvent(reader2)
     if (restoredEvent?.enabled === false) restoredEvent = await readEvent(reader2)
     assert.deepEqual(restoredEvent, { enabled: true })
+    assert.equal(await readEnabled(persistedChildId), true)
+    assert.equal(await readEnabled(childId), false)
+    assert.equal(await readEnabled(forkWhileDisabled), false)
 
     await sendTurn('Turn 2 after reload still xhigh')
     assert.equal(capturedBodies.length, 2)
@@ -656,4 +785,17 @@ test('installed DSH: XHigh overrides pi-ai thinkingLevel without changing modelS
     await sendTurn('Turn 3 after select low')
     assert.equal(capturedBodies.length, 3)
     assert.equal(capturedBodies[2].generationConfig?.thinkingConfig?.thinkingLevel, 'LOW')
+
+    assert.equal((await postState(sessionId, true)).status, 200)
+    await loop.dispose()
+    assert.equal(ctx.sessions.get(childId), undefined)
+    loop = ctx.plugin(AgentLoop, {})
+    await loop
+    await ctx.agents.resume({ resumeSessionId: childId })
+    await ctx.agents.resume({ resumeSessionId: persistedChildId })
+    assert.equal(await readEnabled(childId), false, 'a cold reopen does not copy again')
+    assert.equal(await readEnabled(persistedChildId), true)
+    assert.equal(ctx.sessions.get(sessionId), undefined)
+    const { sessionId: childOfColdSource } = await forkFrom(sessionId)
+    assert.equal(await readEnabled(childOfColdSource), true, 'a cold source still has its persisted XHigh setting')
   })

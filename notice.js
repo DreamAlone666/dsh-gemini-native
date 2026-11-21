@@ -1,4 +1,4 @@
-const statusPath = '/api/dsh-gemini-enhancement/status'
+const statusPath = '/api/dsh-gemini-native/status'
 const recentLimit = 256
 
 // Only confirm assemblies that can be rendered unambiguously. DSH supports
@@ -52,7 +52,6 @@ function normalizeTransport(snapshot) {
     provider: typeof snapshot.provider === 'string' ? snapshot.provider : '',
     model: typeof snapshot.model === 'string' ? snapshot.model : '',
     status: snapshot.status === 'url-mismatch' ? 'url-mismatch' : 'ok',
-    host: typeof snapshot.host === 'string' && snapshot.host.length > 0 ? snapshot.host : null,
     totalHistoryTurns: Number.isSafeInteger(snapshot.totalHistoryTurns) && snapshot.totalHistoryTurns >= 0
       ? snapshot.totalHistoryTurns : null,
     replayedHistoryTurns: Number.isSafeInteger(snapshot.replayedHistoryTurns) && snapshot.replayedHistoryTurns >= 0
@@ -101,41 +100,25 @@ export function localizationNotice(ctx, config, routeConfigOf) {
     }
     const prevDetail = JSON.stringify(detailSnapshot(prev))
     const nextDetail = JSON.stringify(detailSnapshot(next))
-    const prevLegacy = prev.localizedProvider
-    const nextLegacy = next.localizedProvider
-
     const isEmpty = next.localizedProvider === null && next.prompt === null && next.transport === null
-    let evicted
     if (isEmpty) {
       recent.delete(sessionId)
     } else {
-      if (recent.has(sessionId) && prevDetail === nextDetail && prevLegacy === nextLegacy) return
+      if (recent.has(sessionId) && prevDetail === nextDetail) return
       recent.delete(sessionId)
       recent.set(sessionId, next)
       if (recent.size > recentLimit) {
-        evicted = recent.keys().next().value
+        const evicted = recent.keys().next().value
         recent.delete(evicted)
+        publish(evicted, JSON.stringify(detailSnapshot(undefined)))
       }
     }
+    if (prevDetail !== nextDetail) publish(sessionId, nextDetail)
+  }
 
-    if (evicted !== undefined) {
-      const emptyDetail = JSON.stringify(detailSnapshot(undefined))
-      const emptyLegacy = JSON.stringify(null)
-      for (const sub of subscribers) {
-        if (sub.sessionId !== evicted) continue
-        sub.update(sub.detail ? emptyDetail : emptyLegacy)
-      }
-    }
-
-    if (prevLegacy !== nextLegacy || prevDetail !== nextDetail) {
-      for (const sub of subscribers) {
-        if (sub.sessionId !== sessionId) continue
-        if (sub.detail) {
-          if (prevDetail !== nextDetail) sub.update(nextDetail)
-        } else if (prevLegacy !== nextLegacy) {
-          sub.update(JSON.stringify(nextLegacy))
-        }
-      }
+  function publish(sessionId, payload) {
+    for (const sub of subscribers) {
+      if (sub.sessionId === sessionId) sub.update(payload)
     }
   }
 
@@ -158,15 +141,7 @@ export function localizationNotice(ctx, config, routeConfigOf) {
     const sessionId = url.searchParams.get('sessionId')
     if (!sessionId || sessionId.length > 256) return new Response(null, { status: 400 })
     if (!config.showStatusNotice.get() || request.signal.aborted) return new Response(null, { status: 204 })
-    const detail = url.searchParams.get('detail') === '1'
-    let pending
-    if (detail) {
-      pending = JSON.stringify(detailSnapshot(recent.get(sessionId)))
-    } else {
-      let provider = recent.get(sessionId)?.localizedProvider ?? null
-      if (provider !== null && !routeConfigOf(config.routes.get(), provider).localizePrompt) provider = null
-      pending = JSON.stringify(provider)
-    }
+    let pending = JSON.stringify(detailSnapshot(recent.get(sessionId)))
     let sent
     let controller
     let closed = false
@@ -185,7 +160,7 @@ export function localizationNotice(ctx, config, routeConfigOf) {
       sent = pending
       controller.enqueue(encoder.encode(`data: ${sent}\n\n`))
     }
-    const sub = { sessionId, detail, close, update(payload) { pending = payload; flush() } }
+    const sub = { sessionId, close, update(payload) { pending = payload; flush() } }
     return new Response(new ReadableStream({
       start(stream) {
         controller = stream

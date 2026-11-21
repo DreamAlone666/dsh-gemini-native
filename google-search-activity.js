@@ -1,6 +1,7 @@
 import { observeGoogleSearchResponse } from './google-search-sse.js'
+import { summarizeNativeEvent } from './native-search-projection.js'
 
-export const searchActivityPath = '/api/dsh-gemini-enhancement/search-activity'
+export const searchActivityPath = '/api/dsh-gemini-native/search-activity'
 const sessionLimit = 48
 const cardLimit = 12
 const empty = { liveTurn: null, cards: [] }
@@ -28,16 +29,20 @@ export function googleSearchActivity(ctx) {
     notify(sessionId, view)
   }
 
-  function endAttempt(sessionId, attemptId) {
+  function endAttempt(sessionId, attemptId, committedEvent) {
     const attempt = attempts.get(sessionId)
     if (attempt === undefined || attempt.attemptId !== attemptId) return
     attempts.delete(sessionId)
     const view = views.get(sessionId)
-    if (!view?.cards.some(card => card.id === attempt.id && (attempt.liveOnly || card.status === 'running'))) return
-    const cards = attempt.liveOnly ? view.cards.filter(card => card.id !== attempt.id)
-      : view.cards.map(card => card.id === attempt.id && card.status === 'running'
-        ? { ...card, status: 'incomplete' } : card)
-    publish(sessionId, { ...view, cards })
+    const card = view?.cards.find(card => card.id === attempt.id)
+    if (!card) return
+    // Drop the process-local duplicate only if this exact attempt produced
+    // a durable search card. Keep bounded fallback for overflow or cancellation.
+    if (committedEvent && summarizeNativeEvent(committedEvent)?.card) {
+      publish(sessionId, { ...view, cards: view.cards.filter(item => item !== card) })
+    } else if (card.status === 'running') {
+      publish(sessionId, { ...view, cards: view.cards.map(item => item === card ? { ...item, status: 'incomplete' } : item) })
+    }
   }
 
   function endTurn(sessionId, turn) {
@@ -52,7 +57,11 @@ export function googleSearchActivity(ctx) {
       if (old) endAttempt(sessionId, old.attemptId)
       const { attemptId, turn, step } = frame
       attempts.set(sessionId, { attemptId, turn, step, id: `${turn}:${step}:${attemptId}` })
-    } else if (frame.type === 'end') endAttempt(sessionId, frame.attemptId)
+    } else if (frame.type === 'end') {
+      const committed = frame.outcome?.kind === 'committed' && ctx.get?.('sessionProjections')
+        ? agent.session?.eventAt(frame.outcome.seq) : undefined
+      endAttempt(sessionId, frame.attemptId, committed)
+    }
   })
   ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/end') endTurn(session.id, event.data.turn)
@@ -106,10 +115,9 @@ export function googleSearchActivity(ctx) {
     watchers.clear()
   })
 
-  function reportFor(sessionId, liveOnly = false) {
+  function reportFor(sessionId) {
     const attempt = attempts.get(sessionId)
     if (!attempt) return undefined
-    attempt.liveOnly = liveOnly
     return report => {
       if (attempts.get(sessionId) !== attempt) return
       const { id, turn, step } = attempt

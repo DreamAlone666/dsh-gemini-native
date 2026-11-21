@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { collectGoogleSearchEvidence, observeGoogleSearchResponse, observeSseResponse } from './google-search-sse.js'
 import {
   applyGoogleSearchTools, attachNativeReplay, isObject, makeNativeReplayData, normalizeEndpoint,
-  patchGenerateContentBody, responseFrame, routeIdentity, selectedCandidate,
+  patchGenerateContentBody, responseFrame, routeIdentity,
 } from './generate-content.js'
 import { applyXHighThinking, supportsXHighModel } from './xhigh.js'
 
@@ -57,7 +57,7 @@ function hasSearchTool(tools) {
     && (Object.hasOwn(tool, 'googleSearch') || Object.hasOwn(tool, 'google_search') || Object.hasOwn(tool, 'googleSearchRetrieval')))
 }
 
-function buildOutboundTelemetry(state, host, finalBody, historyStats = null) {
+function buildOutboundTelemetry(state, finalBody, historyStats) {
   const localToolCount = countLocalTools(finalBody?.tools)
   const searchInjected = hasSearchTool(finalBody?.tools)
   const searchConfigured = state.googleSearch === true
@@ -74,7 +74,6 @@ function buildOutboundTelemetry(state, host, finalBody, historyStats = null) {
     provider: state.provider,
     model: state.model,
     status: 'ok',
-    host: host ?? null,
     totalHistoryTurns: historyStats ? historyStats.totalModelTurns : null,
     replayedHistoryTurns: historyStats ? historyStats.replayedModelTurns : null,
     searchConfigured,
@@ -138,6 +137,7 @@ function scopedStream(scope, state, next, onFinish) {
                   capture.route, state.model, capture.frames, callIds, outcome, capture.prefix,
                   outcome === 'complete' ? normalizedBlocks : undefined,
                 )
+                capture.attached = true
                 yield { ...chunk, replayState: attachNativeReplay(chunk.replayState, nativeData) }
                 continue
               }
@@ -146,10 +146,11 @@ function scopedStream(scope, state, next, onFinish) {
           yield chunk
         }
       } finally {
-        if (!done && typeof iterator.return === 'function') {
-          await scope.run(state, () => iterator.return())
+        try {
+          if (!done && typeof iterator.return === 'function') await scope.run(state, () => iterator.return())
+        } finally {
+          onFinish(state)
         }
-        onFinish?.(state)
       }
     },
   }
@@ -172,7 +173,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled, recordTransport) {
+export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled, recordTransport, isGeminiRoute) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -181,133 +182,105 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
   function warnOnce(message) {
     if (warned) return
     warned = true
-    ctx.logger.warn(`Gemini enhancement: ${message}`)
+    ctx.logger.warn(`Gemini Native: ${message}`)
   }
 
-  function reportMainTransport(state, snapshot) {
-    if (active && state?.purpose === undefined) {
-      recordTransport?.(state.sessionId, snapshot)
-    }
+  function recordsTelemetry(state) {
+    return active && state && !state.readOnly && recordTransport && (config.showStatusNotice?.get() ?? true)
+  }
+
+  function report(state, snapshot) {
+    try { recordTransport(state.sessionId, snapshot) } catch { /* Diagnostics must not affect inference. */ }
   }
 
   function reportStreamFinish(state) {
-    if (!active || state?.purpose !== undefined || !state.capture || !state.outboundTelemetry) return
-    const capture = state.capture
-    const recordStatus = capture.overflow
-      ? 'overflow'
-      : capture.invalid
-        ? 'invalid'
-        : (capture.frames.length > 0 ? 'saved' : 'none')
-    recordTransport?.(state.sessionId, {
-      ...state.outboundTelemetry,
+    const { capture, outboundTelemetry } = state
+    if (!capture || !outboundTelemetry || !recordsTelemetry(state)) return
+    report(state, {
+      ...outboundTelemetry,
       recordedBytes: capture.savedBytes,
       recordedFrames: capture.frames.length,
-      recordStatus,
+      recordStatus: capture.overflow ? 'overflow' : capture.attached ? 'saved' : capture.invalid ? 'invalid' : 'none',
     })
+  }
+
+  function planRequest(state, body) {
+    let history
+    let route
+    if (state.nativeHistory) {
+      let baseURL
+      try { baseURL = normalizeEndpoint(state.baseURL) } catch { return }
+      route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
+      route.identity = routeIdentity(route)
+      history = patchGenerateContentBody(body, state.request, route)
+    }
+    const patched = history ?? applyGoogleSearchTools(body, state.googleSearch)
+    const thinking = applyXHighThinking(patched.body, state.xhigh)
+    return { body: thinking.body, changed: patched.changed || thinking.changed, route, history }
+  }
+
+  function captureResponse(state, response, plan, reportSearch) {
+    const capture = {
+      route: plan.route, prefix: plan.history.prefix, frames: [], savedBytes: 0,
+      overflow: false, invalid: false, attached: false,
+    }
+    state.capture = capture
+    const observeSearch = reportSearch ? collectGoogleSearchEvidence(reportSearch) : undefined
+    return Promise.resolve(response).then(res => observeSseResponse(res, payload => {
+      observeSearch?.(payload)
+      if (capture.overflow) return
+      const frame = responseFrame(payload)
+      if (!frame) return
+      capture.savedBytes += Buffer.byteLength(JSON.stringify(frame))
+      if (capture.savedBytes > replayLimit || capture.frames.length >= candidateLimit) {
+        capture.overflow = true
+        capture.frames.length = 0
+      } else {
+        capture.frames.push(frame)
+      }
+    }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
   }
 
   function installTransport() {
     if (transport !== undefined || !active) return
     const previous = globalThis.fetch
     if (typeof previous !== 'function') return
-    function fetchWithGeminiEnhancement(input, init) {
+    function fetchWithGeminiNative(input, init) {
       const state = active ? scope.getStore() : undefined
       const expected = state?.url
-      if (expected !== undefined && typeof input === 'string' && init?.method === 'POST') {
-        const url = URL.parse(input)
-        if (url?.origin === expected.origin && url.pathname === expected.pathname
-          && url.searchParams.get('alt') === 'sse') {
-          const parsed = parseBody(init.body)
-          if (parsed !== undefined) {
-            if (state.readOnly) {
-              if (state.nativeHistory) {
-                let route
-                try {
-                  const baseURL = normalizeEndpoint(state.baseURL)
-                  route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
-                  route.identity = routeIdentity(route)
-                } catch { /* Non-standard endpoint stays untouched. */ }
-                if (route) {
-                  const patched = patchGenerateContentBody(parsed, state.request, route)
-                  if (patched?.changed) {
-                    const forwarded = replaceBody(init, JSON.stringify(patched.body))
-                    return previous.call(this, input, forwarded)
-                  }
-                }
-              } else if (state.googleSearch) {
-                const toolsPatched = applyGoogleSearchTools(parsed, true)
-                if (toolsPatched.changed) {
-                  const forwarded = replaceBody(init, JSON.stringify(toolsPatched.body))
-                  return previous.call(this, input, forwarded)
-                }
-              }
-            } else if (state.nativeHistory) {
-              let route
-              try {
-                const baseURL = normalizeEndpoint(state.baseURL)
-                route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
-                route.identity = routeIdentity(route)
-              } catch { /* Non-standard endpoint stays untouched. */ }
-              if (route) {
-                const patched = patchGenerateContentBody(parsed, state.request, route)
-                if (patched) {
-                  const thinkingPatched = applyXHighThinking(patched.body, state.xhigh)
-                  const changed = patched.changed || thinkingPatched.changed
-                  const forwarded = changed ? replaceBody(init, JSON.stringify(thinkingPatched.body)) : init
-                  const capture = { route, prefix: patched.prefix, frames: [], savedBytes: 0, overflow: false, invalid: false }
-                  state.capture = capture
-                  const outbound = buildOutboundTelemetry(state, url.host, thinkingPatched.body, patched)
-                  state.outboundTelemetry = outbound
-                  reportMainTransport(state, outbound)
-                  const report = reportFor?.(state.sessionId, true)
-                  const observeSearch = report ? collectGoogleSearchEvidence(report) : undefined
-                  const result = previous.call(this, input, forwarded)
-                  return Promise.resolve(result).then(response => observeSseResponse(response, json => {
-                    if (!isObject(json)) return
-                    const frame = responseFrame(json)
-                    if (!frame?.length) return
-                    const candidate = selectedCandidate(frame)
-                    if (candidate != null) observeSearch?.({ candidates: [candidate] })
-                    if (capture.overflow) return
-                    capture.savedBytes += Buffer.byteLength(JSON.stringify(frame))
-                    if (capture.savedBytes > replayLimit || capture.frames.length >= candidateLimit) {
-                      capture.overflow = true
-                      capture.frames.length = 0
-                    } else {
-                      capture.frames.push(frame)
-                    }
-                  }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
-                }
-              }
-            } else if (state.googleSearch || state.xhigh) {
-              const toolsPatched = applyGoogleSearchTools(parsed, state.googleSearch)
-              const thinkingPatched = applyXHighThinking(toolsPatched.body, state.xhigh)
-              const outbound = buildOutboundTelemetry(state, url.host, thinkingPatched.body, null)
-              reportMainTransport(state, outbound)
-              if (toolsPatched.changed || thinkingPatched.changed) {
-                const forwarded = replaceBody(init, JSON.stringify(thinkingPatched.body))
-                const report = toolsPatched.changed ? reportFor?.(state.sessionId, false) : undefined
-                const result = previous.call(this, input, forwarded)
-                return report ? Promise.resolve(result).then(response => {
-                  try { return observeGoogleSearchResponse(response, report) } catch { return response }
-                }) : result
-              }
-            }
-          }
-        }
+      if (!expected || typeof input !== 'string' || init?.method !== 'POST') return previous.apply(this, arguments)
+      const url = URL.parse(input)
+      if (url?.origin !== expected.origin || url.pathname !== expected.pathname
+        || url.searchParams.get('alt') !== 'sse') return previous.apply(this, arguments)
+      const parsed = parseBody(init.body)
+      if (!parsed) return previous.apply(this, arguments)
+      const plan = planRequest(state, parsed)
+      if (!plan) return previous.apply(this, arguments)
+      const forwarded = plan.changed ? replaceBody(init, JSON.stringify(plan.body)) : init
+      if (recordsTelemetry(state)) {
+        state.outboundTelemetry = buildOutboundTelemetry(state, plan.body, plan.history)
+        report(state, state.outboundTelemetry)
       }
-      return previous.apply(this, arguments)
+      const response = previous.call(this, input, forwarded)
+      if (state.readOnly) return response
+      const reportSearch = plan.history || (state.googleSearch && hasSearchTool(plan.body.tools))
+        ? reportFor?.(state.sessionId) : undefined
+      if (plan.history) return captureResponse(state, response, plan, reportSearch)
+      return reportSearch ? Promise.resolve(response).then(res => {
+        try { return observeGoogleSearchResponse(res, reportSearch) } catch { return res }
+      }) : response
     }
-    try { globalThis.fetch = fetchWithGeminiEnhancement } catch {
-      warnOnce('this Host does not allow wrapping fetch; Gemini transport enhancements remain inactive.')
+    try { globalThis.fetch = fetchWithGeminiNative } catch {
+      warnOnce('this Host does not allow wrapping fetch; Gemini native transport features remain inactive.')
       return
     }
-    transport = { previous, wrapper: fetchWithGeminiEnhancement }
+    transport = { previous, wrapper: fetchWithGeminiNative }
   }
 
   ctx.on('llm/stream', (request, next) => {
     let state
-    if (active && request.purpose === undefined && request.sessionId !== undefined) {
+    const eligible = active && request.sessionId !== undefined && isGeminiRoute?.(request.provider) !== false
+    if (eligible && request.purpose === undefined) {
       const routeCfg = routeConfigOf(config.routes.get(), request.provider)
       const xhigh = isXHighEnabled?.(request.sessionId) === true && supportsXHighModel(request.model)
       if (routeCfg.nativeHistory || routeCfg.googleSearch || xhigh) {
@@ -315,7 +288,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
         // whose marker WeakSet might belong to a different module generation.
         const isAgentLoopRequest = loopRequestPredicate(ctx)
         if (!isAgentLoopRequest) {
-          warnOnce('cannot identify Agent Loop requests on this DSH version; Gemini transport enhancements remain inactive.')
+          warnOnce('cannot identify Agent Loop requests on this DSH version; Gemini native transport features remain inactive.')
         } else if (isAgentLoopRequest(request)) {
           state = {
             readOnly: false,
@@ -332,7 +305,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           }
         }
       }
-    } else if (active && request.purpose === 'compaction' && request.sessionId !== undefined) {
+    } else if (eligible && request.purpose === 'compaction') {
       const routeCfg = routeConfigOf(config.routes.get(), request.provider)
       if ((routeCfg.nativeHistory || routeCfg.googleSearch) && isSameCompactionRoute(ctx, request)) {
         state = {
@@ -361,13 +334,11 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
       state.url = generationUrl(request.baseURL, request.model)
       state.baseURL = request.baseURL
       if (state.url) installTransport()
-      else if (state.purpose === undefined) {
-        const host = (() => { try { return new URL(request.baseURL).host } catch { return null } })()
-        reportMainTransport(state, {
+      else if (recordsTelemetry(state)) {
+        report(state, {
           provider: state.provider,
           model: state.model,
           status: 'url-mismatch',
-          host,
           totalHistoryTurns: null,
           replayedHistoryTurns: null,
           searchConfigured: state.googleSearch,

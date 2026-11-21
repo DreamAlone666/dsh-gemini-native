@@ -1,7 +1,7 @@
 import { isObject } from './generate-content.js'
 
-export const xhighPath = '/api/dsh-gemini-enhancement/xhigh'
-export const xhighStorageUnit = 'dsh_gemini_enhancement_xhigh'
+export const xhighPath = '/api/dsh-gemini-native/xhigh'
+export const xhighStorageUnit = 'dsh_gemini_native_xhigh'
 const xhighStorageTable = 'sessions'
 const sessionLimit = 256
 const xhighModelPattern = /^(?:models\/)?gemini-4-(?:neon|hydrogen)(?:$|[-.@])/iu
@@ -43,6 +43,9 @@ export function xhighState(ctx) {
   const watchers = new Map()
   const encoder = new TextEncoder()
   const touchedBeforeLoad = new Map()
+  const changedDuringForks = new Map()
+  let pendingForks = 0
+  let changeRevision = 0
   let storageLoading = false
   let unit = null
   let storageReady = Promise.resolve()
@@ -58,7 +61,7 @@ export function xhighState(ctx) {
       try {
         await op(unit)
       } catch (error) {
-        ctx.logger?.warn?.(`Gemini enhancement: failed to persist XHigh state: ${error?.message ?? error}`)
+        ctx.logger?.warn?.(`Gemini Native: failed to persist XHigh state: ${error?.message ?? error}`)
       }
     })
     return writeChain
@@ -81,14 +84,22 @@ export function xhighState(ctx) {
     return typeof sessionId === 'string' && enabled.has(sessionId)
   }
 
+  function noteChange(sessionId) {
+    if (pendingForks > 0) changedDuringForks.set(sessionId, ++changeRevision)
+  }
+
   function setEnabled(sessionId, value) {
     if (!validSessionId(sessionId)) return false
+    noteChange(sessionId)
     const next = value === true
     const prev = enabled.has(sessionId)
     if (prev === next) {
       if (next) {
         enabled.delete(sessionId)
         enabled.add(sessionId)
+      } else if (storageLoading) {
+        // Turning off during load also clears any record not yet hydrated.
+        touchedBeforeLoad.set(sessionId, false)
       }
       return next
     }
@@ -99,6 +110,7 @@ export function xhighState(ctx) {
         const oldest = enabled.values().next().value
         enabled.delete(oldest)
         evicted.push(oldest)
+        noteChange(oldest)
         notify(oldest, false)
       }
     } else {
@@ -180,14 +192,20 @@ export function xhighState(ctx) {
   }
 
   ctx.on('session/event', (session, event) => {
-    if (event?.type === 'model/selection' && session?.id && enabled.has(session.id)) {
-      setEnabled(session.id, false)
+    const sessionId = session?.id
+    if (event?.type !== 'model/selection' || !validSessionId(sessionId)) return
+    if (storageLoading || enabled.has(sessionId)) {
+      setEnabled(sessionId, false)
+    } else if (pendingForks && ctx.get?.('agents')?.get?.(sessionId)) {
+      // An explicit selection on an already published child can race fork's
+      // final workspace attachment. Setup before publication is not a reset.
+      noteChange(sessionId)
     }
   })
 
   ctx.on('workspace/session-archived', request => {
     const sessionId = request?.sessionId
-    if (validSessionId(sessionId) && enabled.has(sessionId)) {
+    if (validSessionId(sessionId) && (storageLoading || enabled.has(sessionId) || pendingForks)) {
       setEnabled(sessionId, false)
     }
   })
@@ -204,7 +222,7 @@ export function xhighState(ctx) {
         try {
           opened = await backend.kv.open(xhighUnitDescriptor)
         } catch (error) {
-          ctx.logger?.warn?.(`Gemini enhancement: failed to open XHigh storage: ${error?.message ?? error}`)
+          ctx.logger?.warn?.(`Gemini Native: failed to open XHigh storage: ${error?.message ?? error}`)
           return
         }
         if (closed) {
@@ -216,7 +234,7 @@ export function xhighState(ctx) {
         try {
           snapshot = await opened.loadAll()
         } catch (error) {
-          ctx.logger?.warn?.(`Gemini enhancement: failed to load XHigh storage: ${error?.message ?? error}`)
+          ctx.logger?.warn?.(`Gemini Native: failed to load XHigh storage: ${error?.message ?? error}`)
           return
         }
         if (closed) return
@@ -273,6 +291,54 @@ export function xhighState(ctx) {
         if (localUnit) await localUnit.close().catch(() => {})
       }
     })
+  })
+
+  ctx.inject?.(['sessionController'], child => {
+    child.effect(() => {
+      // The built-in Remote fork exposes both exact IDs here. Session creation
+      // also fires on resume, and the forked Session has no reliable parent ID.
+      const controller = child.sessionController
+      const own = Object.getOwnPropertyDescriptor(controller, 'fork')
+      if (own && (!own.configurable || !Object.hasOwn(own, 'value'))) return
+      const original = controller.fork
+      if (typeof original !== 'function') return
+      let active = true
+
+      async function forkWithXHigh(...args) {
+        if (active && storageLoading) await storageReady
+        const sourceId = args[0]?.sessionId
+        if (!active || !isEnabled(sourceId)) return Reflect.apply(original, this, args)
+
+        const before = changeRevision
+        pendingForks++
+        try {
+          const result = await Reflect.apply(original, this, args)
+          const newId = result?.sessionId
+          if (active && validSessionId(newId) && newId !== sourceId
+            && (changedDuringForks.get(newId) ?? 0) <= before) {
+            // Seed and setup are finished. Commit a second, independent record
+            // before returning; the source is unchanged (but keep it recent).
+            if (enabled.delete(sourceId)) enabled.add(sourceId)
+            setEnabled(newId, true)
+            await writeChain
+          }
+          return result
+        } finally {
+          if (--pendingForks === 0) changedDuringForks.clear()
+        }
+      }
+
+      const descriptor = own ?? { configurable: true, writable: true, enumerable: false }
+      if (!Reflect.defineProperty(controller, 'fork', { ...descriptor, value: forkWithXHigh })) return
+      return () => {
+        active = false
+        // Cordis returns a new callable proxy on method reads; compare the
+        // stored own descriptor, and do not overwrite a later wrapper.
+        if (Object.getOwnPropertyDescriptor(controller, 'fork')?.value !== forkWithXHigh) return
+        if (own) Reflect.defineProperty(controller, 'fork', own)
+        else Reflect.deleteProperty(controller, 'fork')
+      }
+    }, 'Gemini Native: inherit XHigh on Session fork')
   })
 
   ctx.inject?.(['connection'], child => {

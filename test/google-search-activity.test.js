@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { makeReplayState } from '../generate-content.js'
 import { googleSearchActivity, searchActivityPath } from '../google-search-activity.js'
 
 const session = { id: 'session-a' }
@@ -15,11 +16,13 @@ function frame(part) {
   return `data: ${JSON.stringify({ candidates: [{ content: { parts: [part] } }] })}\n\n`
 }
 
-function fixture(t) {
+function fixture(t, committed = new Map()) {
   const events = new Map()
+  const agent = { ...session, session: { eventAt: seq => committed.get(seq) } }
   let dispose
   let route
   const observe = googleSearchActivity({
+    get: key => key === 'sessionProjections' ? {} : undefined,
     on: (name, handler) => events.set(name, handler),
     effect: setup => { dispose = setup() },
     connection: { fetch: { register(def) { route = def } } },
@@ -44,10 +47,11 @@ function fixture(t) {
     try { return await stream.read() } finally { await stream.dispose() }
   }
   function start(turn, step, attemptId) {
-    events.get('agent/assistant-stream')({ agent: session, frame: { type: 'start', turn, step, attemptId } })
+    events.get('agent/assistant-stream')({ agent, frame: { type: 'start', turn, step, attemptId } })
   }
-  function end(attemptId) {
-    events.get('agent/assistant-stream')({ agent: session, frame: { type: 'end', attemptId } })
+  function end(attemptId, seq) {
+    const outcome = seq === undefined ? { kind: 'abandoned' } : { kind: 'committed', eventType: 'assistant/attempt', seq }
+    events.get('agent/assistant-stream')({ agent, frame: { type: 'end', attemptId, outcome } })
   }
   function closeTurn(turn) { events.get('session/event')(session, { type: 'turn/end', data: { turn } }) }
   return { observe, watch, latest, start, end, closeTurn, dispose }
@@ -122,4 +126,27 @@ test('no-search requests add no cards; incomplete attempts and late responses ca
   const stale = sse(frame(resultPart))
   assert.strictEqual(later(stale), stale)
   assert.deepEqual(await f.latest(), afterClose)
+})
+
+test('only drops a temporary card when the matching committed attempt has a durable card', async t => {
+  const committed = new Map()
+  const f = fixture(t, committed)
+  const sse = () => new Response(frame(resultPart), { headers: { 'Content-Type': 'text/event-stream' } })
+  const reply = { type: 'finish', reason: { kind: 'stop' } }
+
+  f.start(1, 1, 'not-recorded')
+  await f.observe(session.id)(sse()).text()
+  committed.set(8, { type: 'assistant/attempt', data: { stream: [{ type: 'chunk', chunk: reply }] } })
+  f.end('not-recorded', 8)
+  f.closeTurn(1)
+  assert.equal((await f.latest()).cards[0].id, '1:1:not-recorded')
+
+  f.start(1, 2, 'recorded')
+  await f.observe(session.id)(sse()).text()
+  const frames = [[{ index: 0, content: { parts: [resultPart] } }]]
+  const replayState = makeReplayState({ identity: 'fixture' }, 'gemini', frames, [], 'failed', 'prefix')
+  committed.set(9, { type: 'assistant/attempt', data: { stream: [{ type: 'chunk', chunk: { ...reply, replayState } }] } })
+  f.end('recorded', 9)
+  f.closeTurn(1)
+  assert.deepEqual((await f.latest()).cards.map(card => card.id), ['1:1:not-recorded'])
 })

@@ -7,7 +7,7 @@ import * as plugin from '../index.js'
 import { localizationNotice } from '../notice.js'
 
 const installed = process.env.DSH_INSTALL_DIR
-const URL = 'http://localhost/api/dsh-gemini-enhancement/status?sessionId=session-a'
+const URL = 'http://localhost/api/dsh-gemini-native/status?sessionId=session-a'
 const geminiProvider = 'gemini-relay'
 const otherProvider = 'other-provider'
 const model = 'gemini-4-argon'
@@ -25,9 +25,9 @@ test('installed DSH: notice confirms the actual localized request per provider, 
   const sys = await ctx.plugin(SystemPrompt, { personaPrefix: 'You are a coding agent powered by the {{model}} model.' })
   t.after(() => sys.dispose())
   ctx.systemPrompt.variable('model', context => context.modelSelection?.model)
-  const fiber = await ctx.plugin(plugin, {})
+  const fiber = await ctx.plugin(plugin, { showStatusNotice: false })
   t.after(() => fiber.dispose())
-  const path = '/api/dsh-gemini-enhancement/status'
+  const path = '/api/dsh-gemini-native/status'
   const route = () => routes.get(path)
   assert.equal(route().path, path)
   assert.equal(route().fetch(new Request(URL)).status, 204)
@@ -43,7 +43,7 @@ test('installed DSH: notice confirms the actual localized request per provider, 
   const reader = response.body.getReader()
   const read = async () => {
     const frame = await reader.read()
-    return frame.done ? undefined : JSON.parse(new TextDecoder().decode(frame.value).slice('data: '.length))
+    return frame.done ? undefined : JSON.parse(new TextDecoder().decode(frame.value).slice('data: '.length)).localizedProvider
   }
   assert.equal(await read(), null)
   const streamStub = { async *[Symbol.asyncIterator]() {} }
@@ -63,7 +63,7 @@ test('installed DSH: notice confirms the actual localized request per provider, 
   // Before a request, and for foreign signals, sessions, or providers, no positive evidence.
   const snapshot = async () => {
     const probe = route().fetch(new Request(URL)).body.getReader()
-    try { return JSON.parse(new TextDecoder().decode((await probe.read()).value).slice('data: '.length)) }
+    try { return (await readSseJson(probe)).localizedProvider }
     finally { await probe.cancel() }
   }
   assert.equal(await snapshot(), null)
@@ -119,7 +119,7 @@ function noticeFixture({ showStatusNotice = true, routes = {} } = {}) {
     routes: { get: () => currentRoutes },
   }
   const notice = localizationNotice(ctx, config, plugin.routeConfigOf)
-  const route = () => registered.get('/api/dsh-gemini-enhancement/status')
+  const route = () => registered.get('/api/dsh-gemini-native/status')
   const streamStub = { async *[Symbol.asyncIterator]() {} }
   function emitStream(options) {
     for (const fn of handlers.get('llm/stream') ?? []) {
@@ -141,28 +141,24 @@ async function readSseJson(reader) {
   return frame.done ? undefined : JSON.parse(new TextDecoder().decode(frame.value).slice('data: '.length))
 }
 
-test('detail=1 telemetry tracks prompt stats, transport snapshots without waking legacy watchers, and enforces 256 LRU limit', async t => {
+test('status SSE sends only structured stats, omits upstream host, and enforces the 256 session cap', async t => {
   const f = noticeFixture({
     showStatusNotice: false,
     routes: { [geminiProvider]: { localizePrompt: true, nativeHistory: true, googleSearch: true } },
   })
   t.after(() => f.dispose())
 
-  assert.equal(f.route().fetch(new Request(`${URL}&detail=1`)).status, 204)
-  assert.equal(f.route().fetch(new Request('http://localhost/api/dsh-gemini-enhancement/status?detail=1')).status, 400)
+  assert.equal(f.route().fetch(new Request(URL)).status, 204)
+  assert.equal(f.route().fetch(new Request('http://localhost/api/dsh-gemini-native/status')).status, 400)
 
   f.setShow(true)
   const preAborted = new AbortController()
   preAborted.abort()
-  assert.equal(f.route().fetch(new Request(`${URL}&detail=1`, { signal: preAborted.signal })).status, 204)
+  assert.equal(f.route().fetch(new Request(URL, { signal: preAborted.signal })).status, 204)
 
-  const legacyAbort = new AbortController()
   const detailAbort = new AbortController()
-  t.after(() => { legacyAbort.abort(); detailAbort.abort() })
-  const legacyReader = f.route().fetch(new Request(URL, { signal: legacyAbort.signal })).body.getReader()
-  const detailReader = f.route().fetch(new Request(`${URL}&detail=1`, { signal: detailAbort.signal })).body.getReader()
-
-  assert.equal(await readSseJson(legacyReader), null)
+  t.after(() => detailAbort.abort())
+  const detailReader = f.route().fetch(new Request(URL, { signal: detailAbort.signal })).body.getReader()
   assert.deepEqual(await readSseJson(detailReader), {
     localizedProvider: null,
     prompt: null,
@@ -185,19 +181,17 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
     messages: [send(chineseIdentity)],
   })
 
-  assert.equal(await readSseJson(legacyReader), geminiProvider)
   assert.deepEqual(await readSseJson(detailReader), {
     localizedProvider: geminiProvider,
     prompt: { provider: geminiProvider, matched: 4, total: 6, missedBuiltins: ['tool:read', 'tool:edit'] },
     transport: null,
   })
 
-  // recordTransport updates detail watcher only, deduplicates identical snapshots, and emits when finalized.
+  // recordTransport updates the status watcher, deduplicates identical snapshots, and emits when finalized.
   const outbound = {
     provider: geminiProvider,
     model,
     status: 'ok',
-    host: 'generativelanguage.googleapis.com',
     totalHistoryTurns: 2,
     replayedHistoryTurns: 2,
     searchConfigured: true,
@@ -211,7 +205,7 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
     recordedFrames: null,
     recordStatus: null,
   }
-  f.notice.recordTransport('session-a', outbound)
+  f.notice.recordTransport('session-a', { ...outbound, host: 'relay.test' })
   // Duplicate identical snapshot must not emit another event.
   f.notice.recordTransport('session-a', { ...outbound })
   const inbound = { ...outbound, recordedBytes: 1024, recordedFrames: 3, recordStatus: 'saved' }
@@ -238,7 +232,6 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
     model: 'other-model',
     messages: [send('English prompt')],
   })
-  assert.equal(await readSseJson(legacyReader), null)
   assert.deepEqual(await readSseJson(detailReader), {
     localizedProvider: null,
     prompt: null,
@@ -255,7 +248,6 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
     model,
     messages: [send(chineseIdentity)],
   })
-  assert.equal(await readSseJson(legacyReader), geminiProvider)
   assert.deepEqual(await readSseJson(detailReader), {
     localizedProvider: geminiProvider,
     prompt: { provider: geminiProvider, matched: 4, total: 6, missedBuiltins: ['tool:read', 'tool:edit'] },
@@ -265,7 +257,6 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
   for (let i = 0; i < 256; i++) {
     f.notice.recordTransport(`lru-session-${i}`, { ...inbound, model: `m-${i}` })
   }
-  assert.equal(await readSseJson(legacyReader), null)
   assert.deepEqual(await readSseJson(detailReader), {
     localizedProvider: null,
     prompt: null,
@@ -273,7 +264,7 @@ test('detail=1 telemetry tracks prompt stats, transport snapshots without waking
   })
 })
 
-test('installed DSH: detail=1 computes prompt stats (matched, total, missedBuiltins capped at 6) without leaking prompt text', { skip: !installed, timeout: 5000 }, async t => {
+test('installed DSH: status SSE computes prompt stats (matched, total, missedBuiltins capped at 6) without leaking prompt text', { skip: !installed, timeout: 5000 }, async t => {
   const require = createRequire(join(installed, 'package.json'))
   const load = spec => import(pathToFileURL(require.resolve(spec)).href)
   const { Context } = await load('@deepseek-ai/cordis')
@@ -304,8 +295,8 @@ test('installed DSH: detail=1 computes prompt stats (matched, total, missedBuilt
 
   const abort = new AbortController()
   t.after(() => abort.abort())
-  const detailRoute = routes.get('/api/dsh-gemini-enhancement/status')
-  const reader = detailRoute.fetch(new Request(`${URL}&detail=1`, { signal: abort.signal })).body.getReader()
+  const detailRoute = routes.get('/api/dsh-gemini-native/status')
+  const reader = detailRoute.fetch(new Request(URL, { signal: abort.signal })).body.getReader()
   assert.deepEqual(await readSseJson(reader), { localizedProvider: null, prompt: null, transport: null })
 
   const signal = new AbortController().signal

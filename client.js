@@ -1,42 +1,44 @@
 window.__ModuleLoader__.load({
-  id: 'dsh-gemini-enhancement',
+  id: 'dsh-gemini-native',
   factory(require) {
     const React = require('react')
     let ReactDOM = null
     try { ReactDOM = require('react-dom') } catch { ReactDOM = null }
     const h = React.createElement
-    const namespace = 'dshGeminiEnhancement'
-    const pluginId = 'dsh-gemini-enhancement'
+    const namespace = 'dshGeminiNative'
+    const pluginId = 'dsh-gemini-native'
 
     const en = {
-      brand: 'Gemini Enhancement',
+      brand: 'Gemini Native',
       localizePrompt: 'Localize system prompt',
       localizePromptTitle: 'Replace known built-in DSH English system prompts with Simplified Chinese on this provider.',
       nativeHistory: 'Native history replay',
-      nativeHistoryTitle: 'Preserve and replay Gemini native parts (thought signatures, server-side tool parts, and opaque fields). Excludes sessions containing native data from official session log uploads.',
+      nativeHistoryTitle: 'Record and replay native parts, including thought signatures and server-side tool data.',
+      nativeHistoryPrivacy: 'Native history is on by default and adds response data to the Session log. That data can be shared or exported. Turning off replay does not erase existing data. Disable official Session Log uploads before uninstalling.',
       googleSearch: 'Google Search',
-      googleSearchTitle: 'Replace built-in web_search with native Google Search while keeping all other local tools.',
+      googleSearchTitle: 'Replace built-in web_search with Google Search run by Gemini. Search queries can include information from this conversation.',
       searchWithoutHistoryWarn: 'Without native history replay, follow-up turns after mixing Google Search with local tools may fail.',
-      nonGeminiRoute: 'This provider is no longer a Gemini API route. You can clear its saved Gemini enhancements.',
+      nonGeminiRoute: 'This provider is no longer a Gemini API route. You can clear its saved options.',
       clear: 'Clear',
       clearing: 'Clearing…',
       saving: 'Saving…',
       readOnly: 'Read-only',
-      saveFailed: 'Could not save Gemini enhancement settings. Please try again.',
+      saveFailed: 'Could not save Gemini Native settings. Please try again.',
       saveConflict: 'Settings changed elsewhere. Please retry.',
-      pageIntro: 'Configure per-provider enhancements (system prompt localization, native history replay, and Google Search) directly inside each Gemini API provider card under Settings → Models.',
-      showStatusNotice: 'Show active Gemini enhancements below the composer',
-      showStatusNoticeHelp: 'Displays active enhancements when an enhanced Gemini provider is selected, and confirms once a request uses the localized prompt. Turning this off does not disable any enhancement.',
-      activeRoutesHeading: 'Configured Gemini routes',
-      activeRoutesEmpty: 'No Gemini API providers have enhancements enabled yet. Open Settings → Models and toggle enhancements on any Gemini API provider card.',
+      pageIntro: 'Configure native history replay, Google Search, and system prompt localization on each Gemini API provider card in Settings → Models.',
+      showStatusNotice: 'Show Gemini Native status below the composer',
+      showStatusNoticeHelp: 'Shows the active options and confirms when a request uses the localized prompt. Hiding this notice does not turn off any feature.',
+      activeRoutesHeading: 'Provider overrides',
+      activeRoutesEmpty: 'No overrides. Native history is on for Gemini API providers by default. Open Settings → Models to change a provider’s options.',
       routeStaleTag: 'Not currently a Gemini API provider',
+      nativeHistoryOff: 'Native history off',
       loading: 'Loading settings…',
       unavailable: 'Configuration is unavailable. Check that the bundle and its plugin row are enabled, then reopen this page.',
-      statusMatched: 'Prompt localization matched',
+      statusLocalizationOn: 'Prompt localization on',
       statusLocalized: 'Prompt localized',
       statusNativeHistory: 'Native history',
       statusGoogleSearch: 'Google Search',
-      source: 'Source: Gemini Enhancement plugin',
+      source: 'Source: Gemini Native plugin',
       activityTitle: 'Google Search',
       activityLive: 'Searching Google…',
       activityCompleted: 'Search reported by Gemini',
@@ -89,34 +91,36 @@ window.__ModuleLoader__.load({
     }
 
     const zh = {
-      brand: 'Gemini 增强',
+      brand: 'Gemini Native',
       localizePrompt: '系统提示词汉化',
-      localizePromptTitle: '在此供应商上将已知的 DSH 内置英文系统提示词替换为简体中文（防 Gemini 4 系列降智）。',
+      localizePromptTitle: '在此供应商上将已知的 DSH 内置英文系统提示词替换为简体中文。',
       nativeHistory: '原生历史回放',
-      nativeHistoryTitle: '保留并回放 Gemini 原生 parts（思维签名、服务端工具记录与未知字段）；含原生数据的会话将跳过官方会话日志上传。',
+      nativeHistoryTitle: '录制并回放 Gemini 原生 parts，包括思维签名与服务端工具数据。',
+      nativeHistoryPrivacy: '原生回放默认开启，会向会话日志写入额外的响应数据。分享或导出会话时可能包含这些数据。关闭开关不会清除已有记录；卸载前请先关闭 DSH 官方会话日志上传。',
       googleSearch: 'Google 原生搜索',
-      googleSearchTitle: '保留其余本地工具的同时，用 Google 原生搜索替换内置 web_search。',
+      googleSearchTitle: '由 Gemini 在服务端执行 Google 搜索，替换内置 web_search。搜索词可能包含本会话中的信息。',
       searchWithoutHistoryWarn: '未开启原生历史回放时，混用 Google 原生搜索与本地工具的续轮可能失败。',
-      nonGeminiRoute: '当前已非 Gemini API 供应商，可清除此前保存的 Gemini 增强配置。',
+      nonGeminiRoute: '当前已非 Gemini API 供应商，可清除此前保存的原生配置。',
       clear: '清除',
       clearing: '清除中…',
       saving: '保存中…',
       readOnly: '只读',
-      saveFailed: '未能保存 Gemini 增强设置，请重试。',
+      saveFailed: '未能保存 Gemini Native 设置，请重试。',
       saveConflict: '设置已在别处更改，请重试。',
       pageIntro: '各 Gemini API 供应商的「系统提示词汉化」「原生历史回放」与「Google 原生搜索」均已整合到「设置 → 模型」中对应供应商卡片内就地配置。',
-      showStatusNotice: '在输入框下方显示 Gemini 增强状态',
-      showStatusNoticeHelp: '切到已开启增强的 Gemini 供应商时，在输入框下方显示当前生效项；请求确认使用汉化后更新为已汉化。关闭此项不影响增强本身。',
-      activeRoutesHeading: '已配置的 Gemini 供应商',
-      activeRoutesEmpty: '尚未对任何 Gemini API 供应商启用增强。请前往「设置 → 模型」，在对应 Gemini 供应商卡片内勾选需要的增强项。',
+      showStatusNotice: '在输入框下方显示 Gemini Native 状态',
+      showStatusNoticeHelp: '在输入框下方显示当前生效项；请求确认使用汉化后更新为已汉化。关闭提示不会关闭任何功能。',
+      activeRoutesHeading: '供应商自定义选项',
+      activeRoutesEmpty: '没有自定义选项。Gemini API 供应商默认启用原生回放，可在「设置 → 模型」中修改。',
       routeStaleTag: '当前非 Gemini API 供应商',
+      nativeHistoryOff: '原生回放已关闭',
       loading: '正在加载设置…',
       unavailable: '配置不可用。请确认组合包和插件行均已启用，然后重新打开此页。',
-      statusMatched: '提示词汉化已匹配',
+      statusLocalizationOn: '提示词汉化已开启',
       statusLocalized: '提示词已汉化',
       statusNativeHistory: '原生历史',
       statusGoogleSearch: 'Google 搜索',
-      source: '来源：Gemini 增强插件',
+      source: '来源：Gemini Native 插件',
       activityTitle: 'Google 搜索',
       activityLive: 'Google 搜索中…',
       activityCompleted: 'Gemini 已报告搜索',
@@ -169,13 +173,13 @@ window.__ModuleLoader__.load({
     }
 
     const pluginStyles = `
-.dsh-ge-dock-anchor {
+.dsh-gn-dock-anchor {
   display: inline-flex;
   min-width: 0;
   font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px);
   line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
 }
-.dsh-ge-dock-pill {
+.dsh-gn-dock-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -193,37 +197,37 @@ window.__ModuleLoader__.load({
   white-space: nowrap;
   outline: none;
 }
-.dsh-ge-dock-pill svg {
+.dsh-gn-dock-pill svg {
   width: 14px;
   height: 14px;
   flex: none;
 }
-button.dsh-ge-dock-pill {
+button.dsh-gn-dock-pill {
   cursor: pointer;
 }
-button.dsh-ge-dock-pill[aria-expanded="true"] {
+button.dsh-gn-dock-pill[aria-expanded="true"] {
   background: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-secondary);
 }
 @media (hover: hover) {
-  button.dsh-ge-dock-pill:hover {
+  button.dsh-gn-dock-pill:hover {
     background: var(--dsw-alias-interactive-bg-hover);
     color: var(--dsw-alias-label-secondary);
   }
 }
-button.dsh-ge-dock-pill:focus-visible {
+button.dsh-gn-dock-pill:focus-visible {
   box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
 }
-.dsh-ge-dock-label {
+.dsh-gn-dock-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dsh-ge-dock-sep {
+.dsh-gn-dock-sep {
   opacity: 0.55;
   margin: 0 5px;
 }
-.dsh-ge-dock-warn-dot {
+.dsh-gn-dock-warn-dot {
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -231,7 +235,7 @@ button.dsh-ge-dock-pill:focus-visible {
   flex: none;
 }
 
-.dsh-ge-diag-panel {
+.dsh-gn-diag-panel {
   position: fixed;
   z-index: 1100;
   box-sizing: border-box;
@@ -259,14 +263,14 @@ button.dsh-ge-dock-pill:focus-visible {
   bottom: max(12px, calc(anchor(top) + 8px));
   left: max(12px, anchor(left));
   right: 12px;
-  position-try-fallbacks: --dsh-ge-diag-window, --dsh-ge-diag-opposite, --dsh-ge-diag-wide-opposite, --dsh-ge-diag-tall, --dsh-ge-diag-viewport;
+  position-try-fallbacks: --dsh-gn-diag-window, --dsh-gn-diag-opposite, --dsh-gn-diag-wide-opposite, --dsh-gn-diag-tall, --dsh-gn-diag-viewport;
   align-self: end;
   justify-self: start;
   height: fit-content;
   min-height: 0;
   margin: 0;
 }
-@position-try --dsh-ge-diag-window {
+@position-try --dsh-gn-diag-window {
   position-area: none;
   top: max(12px, var(--dsh-frame-overlay-top, 12px));
   bottom: max(12px, calc(anchor(top) + 8px));
@@ -276,12 +280,12 @@ button.dsh-ge-dock-pill:focus-visible {
   align-self: safe end;
   justify-self: safe end;
 }
-@position-try --dsh-ge-diag-opposite {
+@position-try --dsh-gn-diag-opposite {
   top: max(12px, calc(anchor(bottom) + 8px));
   bottom: 12px;
   align-self: start;
 }
-@position-try --dsh-ge-diag-wide-opposite {
+@position-try --dsh-gn-diag-wide-opposite {
   top: max(12px, calc(anchor(bottom) + 8px));
   bottom: 12px;
   left: 12px;
@@ -289,7 +293,7 @@ button.dsh-ge-dock-pill:focus-visible {
   align-self: start;
   justify-self: safe end;
 }
-@position-try --dsh-ge-diag-tall {
+@position-try --dsh-gn-diag-tall {
   position-area: none;
   top: max(12px, var(--dsh-frame-overlay-top, 12px));
   bottom: 12px;
@@ -299,14 +303,14 @@ button.dsh-ge-dock-pill:focus-visible {
   align-self: safe start;
   justify-self: start;
 }
-@position-try --dsh-ge-diag-viewport {
+@position-try --dsh-gn-diag-viewport {
   position-area: none;
   inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px;
   margin: 0;
   align-self: safe start;
   justify-self: safe end;
 }
-.dsh-ge-diag-title {
+.dsh-gn-diag-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -315,19 +319,19 @@ button.dsh-ge-dock-pill:focus-visible {
   color: var(--dsw-alias-label-primary);
   font-weight: 500;
 }
-.dsh-ge-diag-title-label {
+.dsh-gn-diag-title-label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
   flex: none;
 }
-.dsh-ge-diag-title-label svg {
+.dsh-gn-diag-title-label svg {
   width: 14px;
   height: 14px;
   flex: none;
 }
-.dsh-ge-diag-route {
+.dsh-gn-diag-route {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -337,17 +341,17 @@ button.dsh-ge-dock-pill:focus-visible {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
-.dsh-ge-diag-rule {
+.dsh-gn-diag-rule {
   margin-bottom: 10px;
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
-.dsh-ge-diag-warns {
+.dsh-gn-diag-warns {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
 }
-.dsh-ge-diag-warn {
+.dsh-gn-diag-warn {
   padding: 6px 8px;
   border-radius: var(--dsw-radius-sm, 8px);
   background: var(--dsw-alias-bg-module-platform);
@@ -356,45 +360,45 @@ button.dsh-ge-dock-pill:focus-visible {
   line-height: 16px;
   overflow-wrap: anywhere;
 }
-.dsh-ge-diag-details {
+.dsh-gn-diag-details {
   display: grid;
   grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
   gap: 6px 16px;
   margin: 0;
   color: var(--dsw-alias-label-tertiary);
 }
-.dsh-ge-diag-details dt,
-.dsh-ge-diag-details dd {
+.dsh-gn-diag-details dt,
+.dsh-gn-diag-details dd {
   min-width: 0;
   margin: 0;
 }
-.dsh-ge-diag-details dd {
+.dsh-gn-diag-details dd {
   color: var(--dsw-alias-label-secondary);
   font-variant-numeric: tabular-nums;
   text-align: right;
   overflow-wrap: anywhere;
 }
-.dsh-ge-diag-sub {
+.dsh-gn-diag-sub {
   margin-top: 2px;
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
   overflow-wrap: anywhere;
 }
-.dsh-ge-diag-hint {
+.dsh-gn-diag-hint {
   margin: 10px 0 0;
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
 }
 
-.dsh-ge-xhigh-wrap {
+.dsh-gn-xhigh-wrap {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
 }
-.dsh-ge-xhigh {
+.dsh-gn-xhigh {
   box-sizing: border-box;
   display: inline-flex;
   align-items: center;
@@ -418,50 +422,50 @@ button.dsh-ge-dock-pill:focus-visible {
   outline: none;
   transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
-.dsh-ge-xhigh-error {
+.dsh-gn-xhigh-error {
   color: var(--dsw-alias-state-error-primary);
   font-size: 12px;
   line-height: 18px;
   white-space: nowrap;
 }
 @media (hover: hover) {
-  .dsh-ge-xhigh:hover:not(:disabled) {
+  .dsh-gn-xhigh:hover:not(:disabled) {
     background: color-mix(in srgb, var(--dsw-alias-state-business-tertiary), var(--dsw-alias-state-business-primary) 6%);
   }
 }
-.dsh-ge-xhigh:focus-visible {
+.dsh-gn-xhigh:focus-visible {
   box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
 }
-.dsh-ge-xhigh:disabled {
+.dsh-gn-xhigh:disabled {
   opacity: 0.6;
   cursor: default;
 }
-.dsh-ge-xhigh-glyph {
+.dsh-gn-xhigh-glyph {
   display: inline-flex;
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
   color: currentColor;
 }
-.dsh-ge-xhigh-hover-glyph,
-.dsh-ge-xhigh:focus-visible .dsh-ge-xhigh-rest-glyph {
+.dsh-gn-xhigh-hover-glyph,
+.dsh-gn-xhigh:focus-visible .dsh-gn-xhigh-rest-glyph {
   display: none;
 }
 @media (hover: hover) {
-  .dsh-ge-xhigh:hover:not(:disabled) .dsh-ge-xhigh-rest-glyph {
+  .dsh-gn-xhigh:hover:not(:disabled) .dsh-gn-xhigh-rest-glyph {
     display: none;
   }
 }
-.dsh-ge-xhigh:focus-visible .dsh-ge-xhigh-hover-glyph {
+.dsh-gn-xhigh:focus-visible .dsh-gn-xhigh-hover-glyph {
   display: block;
 }
 @media (hover: hover) {
-  .dsh-ge-xhigh:hover:not(:disabled) .dsh-ge-xhigh-hover-glyph {
+  .dsh-gn-xhigh:hover:not(:disabled) .dsh-gn-xhigh-hover-glyph {
     display: block;
   }
 }
 
-.dsh-ge-model-opt-row {
+.dsh-gn-model-opt-row {
   position: relative;
   display: flex;
   align-items: center;
@@ -474,12 +478,12 @@ button.dsh-ge-dock-pill:focus-visible {
   font-size: 13px;
   line-height: 20px;
 }
-.dsh-ge-model-opt-label {
+.dsh-gn-model-opt-label {
   display: inline-flex;
   align-items: center;
   min-width: 0;
 }
-.dsh-ge-model-opt-switch {
+.dsh-gn-model-opt-switch {
   box-sizing: border-box;
   position: static;
   flex: 0 0 auto;
@@ -493,24 +497,24 @@ button.dsh-ge-dock-pill:focus-visible {
   cursor: pointer;
   outline: none;
 }
-.dsh-ge-model-opt-switch::after {
+.dsh-gn-model-opt-switch::after {
   content: '';
   position: absolute;
   inset: 0;
   border-radius: var(--dsw-radius-md, 8px);
 }
-.dsh-ge-model-opt-switch[aria-checked="true"] {
+.dsh-gn-model-opt-switch[aria-checked="true"] {
   background: var(--dsw-alias-brand-primary);
 }
-.dsh-ge-model-opt-switch:disabled {
+.dsh-gn-model-opt-switch:disabled {
   cursor: default;
   opacity: 0.5;
 }
-.dsh-ge-model-opt-switch:focus-visible {
+.dsh-gn-model-opt-switch:focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 2px;
 }
-.dsh-ge-model-opt-thumb {
+.dsh-gn-model-opt-thumb {
   display: block;
   width: 16px;
   height: 16px;
@@ -519,29 +523,29 @@ button.dsh-ge-dock-pill:focus-visible {
   background: var(--dsw-alias-label-primary-foreground);
   transition: transform 120ms ease;
 }
-.dsh-ge-model-opt-switch[aria-checked="false"] .dsh-ge-model-opt-thumb {
+.dsh-gn-model-opt-switch[aria-checked="false"] .dsh-gn-model-opt-thumb {
   background: var(--dsw-alias-switch-thumb);
 }
-.dsh-ge-model-opt-switch[aria-checked="true"] .dsh-ge-model-opt-thumb {
+.dsh-gn-model-opt-switch[aria-checked="true"] .dsh-gn-model-opt-thumb {
   transform: translateX(16px);
 }
-.dsh-ge-model-opt-row:has(.dsh-ge-model-opt-switch:focus-visible) {
+.dsh-gn-model-opt-row:has(.dsh-gn-model-opt-switch:focus-visible) {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 @media (hover: hover) {
-  .dsh-ge-model-opt-row:has(.dsh-ge-model-opt-switch:not(:disabled)):hover {
+  .dsh-gn-model-opt-row:has(.dsh-gn-model-opt-switch:not(:disabled)):hover {
     background: var(--dsw-alias-interactive-bg-hover);
   }
 }
 
-.dsh-ge-search-root {
+.dsh-gn-search-root {
   display: flex;
   flex-direction: column;
   width: 100%;
   min-width: 0;
   margin: 4px 0;
 }
-.dsh-ge-search-row {
+.dsh-gn-search-row {
   position: relative;
   overflow: hidden;
   display: flex;
@@ -559,18 +563,18 @@ button.dsh-ge-dock-pill:focus-visible {
   outline: none;
   transition: color 100ms ease;
 }
-.dsh-ge-search-row[data-expandable="true"] {
+.dsh-gn-search-row[data-expandable="true"] {
   cursor: pointer;
 }
 @media (hover: hover) {
-  .dsh-ge-search-row:hover {
+  .dsh-gn-search-row:hover {
     color: var(--dsw-alias-label-secondary);
   }
 }
-.dsh-ge-search-row:focus-visible {
+.dsh-gn-search-row:focus-visible {
   box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
 }
-.dsh-ge-search-leading {
+.dsh-gn-search-leading {
   position: relative;
   flex: none;
   width: calc(16px + var(--dsh-content-font-delta, 0px));
@@ -581,16 +585,16 @@ button.dsh-ge-dock-pill:focus-visible {
   margin-right: 6px;
   color: inherit;
 }
-.dsh-ge-search-leading svg {
+.dsh-gn-search-leading svg {
   width: calc(14px + var(--dsh-content-font-delta, 0px));
   height: calc(14px + var(--dsh-content-font-delta, 0px));
 }
-.dsh-ge-search-icon-idle {
+.dsh-gn-search-icon-idle {
   display: inline-flex;
   opacity: 1;
   transition: opacity 100ms ease;
 }
-.dsh-ge-search-chevron-hover {
+.dsh-gn-search-chevron-hover {
   position: absolute;
   inset: 0;
   margin: auto;
@@ -598,27 +602,27 @@ button.dsh-ge-dock-pill:focus-visible {
   transition: opacity 100ms ease;
 }
 @media (hover: hover) {
-  .dsh-ge-search-row[data-expandable="true"]:hover .dsh-ge-search-icon-idle {
+  .dsh-gn-search-row[data-expandable="true"]:hover .dsh-gn-search-icon-idle {
     opacity: 0;
   }
-  .dsh-ge-search-row[data-expandable="true"]:hover .dsh-ge-search-chevron-hover {
+  .dsh-gn-search-row[data-expandable="true"]:hover .dsh-gn-search-chevron-hover {
     opacity: 1;
   }
 }
-.dsh-ge-search-row[data-expandable="true"]:focus-visible .dsh-ge-search-icon-idle {
+.dsh-gn-search-row[data-expandable="true"]:focus-visible .dsh-gn-search-icon-idle {
   opacity: 0;
 }
-.dsh-ge-search-row[data-expandable="true"]:focus-visible .dsh-ge-search-chevron-hover {
+.dsh-gn-search-row[data-expandable="true"]:focus-visible .dsh-gn-search-chevron-hover {
   opacity: 1;
 }
-.dsh-ge-search-title {
+.dsh-gn-search-title {
   flex: none;
   font-size: var(--dsh-content-font-size-secondary, 13px);
   font-weight: 400;
   line-height: calc(24px + var(--dsh-content-font-delta, 0px));
   color: inherit;
 }
-.dsh-ge-search-dot {
+.dsh-gn-search-dot {
   flex: none;
   width: 2px;
   height: 2px;
@@ -627,7 +631,7 @@ button.dsh-ge-dock-pill:focus-visible {
   opacity: 0.65;
   margin: 0 6px;
 }
-.dsh-ge-search-summary {
+.dsh-gn-search-summary {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -637,7 +641,7 @@ button.dsh-ge-dock-pill:focus-visible {
   line-height: calc(24px + var(--dsh-content-font-delta, 0px));
   color: inherit;
 }
-.dsh-ge-search-body {
+.dsh-gn-search-body {
   margin: 4px 0 4px 4px;
   padding: 12px 14px;
   border-radius: var(--dsw-radius-lg, 16px);
@@ -645,21 +649,21 @@ button.dsh-ge-dock-pill:focus-visible {
   color: var(--dsw-alias-label-primary);
   overflow-wrap: anywhere;
 }
-.dsh-ge-search-section + .dsh-ge-search-section {
+.dsh-gn-search-section + .dsh-gn-search-section {
   margin-top: 10px;
 }
-.dsh-ge-search-section-label {
+.dsh-gn-search-section-label {
   margin-bottom: 6px;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
 }
-.dsh-ge-search-queries {
+.dsh-gn-search-queries {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
-.dsh-ge-search-query-tag {
+.dsh-gn-search-query-tag {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -669,7 +673,7 @@ button.dsh-ge-dock-pill:focus-visible {
   font-size: 12px;
   line-height: 18px;
 }
-.dsh-ge-search-sources {
+.dsh-gn-search-sources {
   margin: 0;
   padding-left: 2.2em;
   display: flex;
@@ -678,10 +682,10 @@ button.dsh-ge-dock-pill:focus-visible {
   max-height: 320px;
   overflow-y: auto;
 }
-.dsh-ge-search-source-item {
+.dsh-gn-search-source-item {
   min-width: 0;
 }
-.dsh-ge-search-source-link {
+.dsh-gn-search-source-link {
   color: var(--dsw-alias-link);
   font-size: 14px;
   font-weight: 500;
@@ -689,29 +693,29 @@ button.dsh-ge-dock-pill:focus-visible {
   word-break: break-word;
   text-decoration: none;
 }
-.dsh-ge-search-source-link:hover,
-.dsh-ge-search-source-link:focus-visible {
+.dsh-gn-search-source-link:hover,
+.dsh-gn-search-source-link:focus-visible {
   text-decoration: underline dotted;
   text-underline-offset: 3px;
 }
-.dsh-ge-search-link-icon {
+.dsh-gn-search-link-icon {
   width: 1.1em;
   height: 1.1em;
   vertical-align: -0.25em;
   margin-right: 5px;
 }
-.dsh-ge-search-source-host {
+.dsh-gn-search-source-host {
   margin-inline-start: 6px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 12px;
   line-height: 18px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .dsh-ge-search-row,
-  .dsh-ge-search-icon-idle,
-  .dsh-ge-search-chevron-hover,
-  .dsh-ge-xhigh,
-  .dsh-ge-model-opt-thumb {
+  .dsh-gn-search-row,
+  .dsh-gn-search-icon-idle,
+  .dsh-gn-search-chevron-hover,
+  .dsh-gn-xhigh,
+  .dsh-gn-model-opt-thumb {
     transition: none;
   }
 }
@@ -802,12 +806,12 @@ button.dsh-ge-dock-pill:focus-visible {
         : undefined
       return {
         localizePrompt: entry?.localizePrompt === true,
-        nativeHistory: entry?.nativeHistory === true,
+        nativeHistory: entry?.nativeHistory !== false,
         googleSearch: entry?.googleSearch === true,
       }
     }
 
-    function hasAnyEnhancement(entry) {
+    function hasAnyNativeFeature(entry) {
       return entry.localizePrompt || entry.nativeHistory || entry.googleSearch
     }
 
@@ -878,7 +882,7 @@ button.dsh-ge-dock-pill:focus-visible {
     function ExternalLinkIcon() {
       return h('svg', {
         width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
-        strokeWidth: 1.2, className: 'dsh-ge-search-link-icon', 'aria-hidden': 'true', focusable: 'false',
+        strokeWidth: 1.2, className: 'dsh-gn-search-link-icon', 'aria-hidden': 'true', focusable: 'false',
       },
       h('path', { d: 'M6.59961 9.40051C6.82779 9.6334 7.10015 9.81842 7.40074 9.94472C7.70132 10.071 8.02409 10.1361 8.35013 10.1361C8.67618 10.1361 8.99894 10.071 9.29953 9.94472C9.60011 9.81842 9.87247 9.6334 10.1007 9.40051L12.9015 6.59967C13.3658 6.13541 13.6266 5.50572 13.6266 4.84915C13.6266 4.19258 13.3658 3.56289 12.9015 3.09863C12.4372 2.63436 11.8075 2.37354 11.151 2.37354C10.4944 2.37354 9.86472 2.63436 9.40045 3.09863L9.05034 3.44873', stroke: 'currentColor' }),
       h('path', { d: 'M9.40051 6.59959C9.17233 6.3667 8.89997 6.18169 8.59939 6.05538C8.2988 5.92907 7.97603 5.86401 7.64999 5.86401C7.32395 5.86401 7.00118 5.92907 6.70059 6.05538C6.40001 6.18169 6.12765 6.3667 5.89946 6.59959L3.09863 9.40043C2.63436 9.8647 2.37354 10.4944 2.37354 11.151C2.37354 11.8075 2.63436 12.4372 3.09863 12.9015C3.56289 13.3657 4.19258 13.6266 4.84915 13.6266C5.50572 13.6266 6.13541 13.3657 6.59967 12.9015L6.94978 12.5514', stroke: 'currentColor' }))
@@ -918,7 +922,7 @@ button.dsh-ge-dock-pill:focus-visible {
       return { busy, error, run }
     }
 
-    function ProviderCardEnhancements({ provider, configured, t, configForm, subscribeConfig, getConfig, subscribeModels, getModels }) {
+    function ProviderCardNativeOptions({ provider, configured, t, configForm, subscribeConfig, getConfig, subscribeModels, getModels }) {
       const configSnap = React.useSyncExternalStore(subscribeConfig, getConfig)
       const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
       const { busy, error, run } = useFormMutator(configForm)
@@ -928,7 +932,7 @@ button.dsh-ge-dock-pill:focus-visible {
 
       const routes = configSnap.value?.routes
       const current = routeEntryOf(routes, providerId)
-      const hasSaved = hasAnyEnhancement(current)
+      const hasSaved = routes != null && Object.hasOwn(routes, providerId)
       const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[providerId] : undefined
       const eligible = modelsSnap.status === 'ready'
         ? isGeminiProfile(providerId, profile)
@@ -941,7 +945,7 @@ button.dsh-ge-dock-pill:focus-visible {
       const disabled = !writable || busy
 
       function updateRoute(next) {
-        const ops = hasAnyEnhancement(next)
+        const ops = !next.nativeHistory || next.localizePrompt || next.googleSearch
           ? [{ op: 'set', path: ['routes', providerId], value: next }]
           : [{ op: 'unset', path: ['routes', providerId] }]
         run(ops)
@@ -987,14 +991,11 @@ button.dsh-ge-dock-pill:focus-visible {
             checked: current[field],
             disabled,
             onChange: event => {
-              const checked = event.target.checked
-              const next = { ...current, [field]: checked }
-              // Enabling Google Search alongside local tools relies on native history for reliable follow-up turns.
-              if (field === 'googleSearch' && checked && !next.nativeHistory) next.nativeHistory = true
-              updateRoute(next)
+              updateRoute({ ...current, [field]: event.target.checked })
             },
           }),
           h('span', null, label)))),
+        h('p', { style: caption }, t('nativeHistoryPrivacy')),
         current.googleSearch && !current.nativeHistory
           ? h('p', { role: 'status', style: warnCaption }, t('searchWithoutHistoryWarn'))
           : null,
@@ -1016,11 +1017,9 @@ button.dsh-ge-dock-pill:focus-visible {
 
       const writable = state.writable === true
       const disabled = !writable || busy
-      const showStatusNotice = state.value?.showStatusNotice === true
+      const showStatusNotice = state.value?.showStatusNotice !== false
       const routes = state.value?.routes && typeof state.value.routes === 'object' ? state.value.routes : {}
-      const activeEntries = Object.entries(routes)
-        .map(([providerId, raw]) => [providerId, routeEntryOf({ [providerId]: raw }, providerId)])
-        .filter(([, entry]) => hasAnyEnhancement(entry))
+      const overrides = Object.keys(routes).map(providerId => [providerId, routeEntryOf(routes, providerId)])
       const providers = modelsSnap.status === 'ready' ? (modelsSnap.value?.providers ?? {}) : null
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 680 } },
@@ -1039,10 +1038,10 @@ button.dsh-ge-dock-pill:focus-visible {
           h(GeminiMark, { label: t('brand'), size: 15 }),
           h('span', null, t('activeRoutesHeading'))),
         h('p', { style: secondary }, t('pageIntro')),
-        activeEntries.length === 0
+        overrides.length === 0
           ? h('p', { style: caption }, t('activeRoutesEmpty'))
           : h('ul', { style: { listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8 } },
-            activeEntries.map(([providerId, entry]) => {
+            overrides.map(([providerId, entry]) => {
               const profile = providers?.[providerId]
               const displayName = profile?.displayName && profile.displayName !== providerId
                 ? `${profile.displayName} (${providerId})`
@@ -1050,7 +1049,7 @@ button.dsh-ge-dock-pill:focus-visible {
               const stale = providers !== null && !isGeminiProfile(providerId, profile)
               const tags = [
                 entry.localizePrompt && t('localizePrompt'),
-                entry.nativeHistory && t('nativeHistory'),
+                t(entry.nativeHistory ? 'nativeHistory' : 'nativeHistoryOff'),
                 entry.googleSearch && t('googleSearch'),
               ].filter(Boolean)
               return h('li', {
@@ -1105,18 +1104,15 @@ button.dsh-ge-dock-pill:focus-visible {
       }
       function connect(sessionId, entry) {
         try {
-          const url = new URL('./api/dsh-gemini-enhancement/status', document.baseURI)
+          const url = new URL('./api/dsh-gemini-native/status', document.baseURI)
           if (url.origin !== window.location.origin) return
           url.searchParams.set('sessionId', sessionId)
-          url.searchParams.set('detail', '1')
           const source = new EventSource(url.href)
           entry.source = source
           source.onmessage = ({ data }) => {
             try {
               const parsed = JSON.parse(data)
-              if (typeof parsed === 'string' || parsed === null) {
-                publish(entry, { localizedProvider: parsed, prompt: null, transport: null })
-              } else if (parsed && typeof parsed === 'object') {
+              if (parsed && typeof parsed === 'object') {
                 publish(entry, {
                   localizedProvider: typeof parsed.localizedProvider === 'string' ? parsed.localizedProvider : null,
                   prompt: parsed.prompt && typeof parsed.prompt === 'object' ? parsed.prompt : null,
@@ -1176,8 +1172,8 @@ button.dsh-ge-dock-pill:focus-visible {
       const panelRef = React.useRef(null)
       const anchorSeqRef = React.useRef(null)
       const reactId = typeof React.useId === 'function' ? React.useId().replaceAll(':', '') : null
-      if (!reactId && !anchorSeqRef.current) anchorSeqRef.current = `ge${++fallbackAnchorSeq}`
-      const anchorName = `--dsh-ge-diag-${reactId ?? anchorSeqRef.current}`
+      if (!reactId && !anchorSeqRef.current) anchorSeqRef.current = `gn${++fallbackAnchorSeq}`
+      const anchorName = `--dsh-gn-diag-${reactId ?? anchorSeqRef.current}`
       const supportsAnchor = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('anchor-name', '--a')
 
       React.useEffect(() => {
@@ -1264,6 +1260,7 @@ button.dsh-ge-dock-pill:focus-visible {
         rows.push({ key: 'prompt', label: t('diagPromptLabel'), value, sub })
       }
 
+      const recordedBytes = activeTransport?.recordStatus === 'saved' ? activeTransport.recordedBytes ?? 0 : 0
       if (routeCfg.nativeHistory || diag?.hasNativePayload) {
         let value
         if (activeTransport && Number.isFinite(activeTransport.totalHistoryTurns) && activeTransport.totalHistoryTurns > 0) {
@@ -1272,12 +1269,12 @@ button.dsh-ge-dock-pill:focus-visible {
           const parts = [fmt(t('diagHistoryReplayHitTpl'), { replayed, total })]
           if (replayed < total) parts[0] += ` (${t('diagHistoryPartialFallback')})`
           if ((diag?.nativeBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryCumulativeTpl'), { size: formatBytes(diag.nativeBytes) }))
-          else if ((activeTransport.recordedBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) }))
+          else if (recordedBytes > 0) parts.push(fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) }))
           value = parts.join(' · ')
         } else if ((diag?.assistantSteps ?? 0) > 0) {
           if (diag.nativeSteps === 0) {
-            value = (activeTransport?.recordedBytes ?? 0) > 0
-              ? fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) })
+            value = recordedBytes > 0
+              ? fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) })
               : t('diagHistoryNoneInSession')
           } else {
             value = fmt(t('diagHistoryDurableTpl'), {
@@ -1286,8 +1283,8 @@ button.dsh-ge-dock-pill:focus-visible {
               size: formatBytes(diag.nativeBytes ?? 0),
             })
           }
-        } else if ((activeTransport?.recordedBytes ?? 0) > 0) {
-          value = fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(activeTransport.recordedBytes) })
+        } else if (recordedBytes > 0) {
+          value = fmt(t('diagHistoryLastTurnTpl'), { size: formatBytes(recordedBytes) })
         } else {
           value = t('diagHistoryEmpty')
         }
@@ -1401,45 +1398,45 @@ button.dsh-ge-dock-pill:focus-visible {
         ? h(ChevronUpIcon)
         : hasBody
           ? h(React.Fragment, null,
-            h('span', { className: 'dsh-ge-search-icon-idle' }, h(GlobeIcon)),
-            h(ChevronDownIcon, { className: 'dsh-ge-search-chevron-hover' }))
+            h('span', { className: 'dsh-gn-search-icon-idle' }, h(GlobeIcon)),
+            h(ChevronDownIcon, { className: 'dsh-gn-search-chevron-hover' }))
           : h(GlobeIcon)
 
       const rowContent = [
-        h('span', { key: 'leading', className: 'dsh-ge-search-leading' }, leading),
-        h('span', { key: 'title', className: 'dsh-ge-search-title' }, t('activityTitle')),
-        h('span', { key: 'dot', className: 'dsh-ge-search-dot', 'aria-hidden': 'true' }),
-        h('span', { key: 'summary', className: 'dsh-ge-search-summary' }, summaryText),
+        h('span', { key: 'leading', className: 'dsh-gn-search-leading' }, leading),
+        h('span', { key: 'title', className: 'dsh-gn-search-title' }, t('activityTitle')),
+        h('span', { key: 'dot', className: 'dsh-gn-search-dot', 'aria-hidden': 'true' }),
+        h('span', { key: 'summary', className: 'dsh-gn-search-summary' }, summaryText),
       ]
 
       const header = hasBody
         ? h('button', {
           type: 'button',
-          className: 'dsh-ge-search-row',
+          className: 'dsh-gn-search-row',
           'data-expandable': 'true',
           'aria-expanded': open,
           onClick: () => setOpen(prev => !prev),
         }, ...rowContent)
-        : h('div', { className: 'dsh-ge-search-row' }, ...rowContent)
+        : h('div', { className: 'dsh-gn-search-row' }, ...rowContent)
 
-      return h('div', { className: 'dsh-ge-search-root', 'data-open': open && hasBody ? 'true' : undefined },
+      return h('div', { className: 'dsh-gn-search-root', 'data-open': open && hasBody ? 'true' : undefined },
         header,
-        open && hasBody ? h('div', { className: 'dsh-ge-search-body', 'data-web': 'search' },
-          queries.length > 0 && h('div', { className: 'dsh-ge-search-section' },
-            h('div', { className: 'dsh-ge-search-section-label' }, t('activityQueries')),
-            h('div', { className: 'dsh-ge-search-queries' },
-              queries.map(query => h('span', { key: query, className: 'dsh-ge-search-query-tag' }, query)))),
-          sources.length > 0 && h('div', { className: 'dsh-ge-search-section' },
-            h('div', { className: 'dsh-ge-search-section-label' }, t('activitySources')),
-            h('ol', { className: 'dsh-ge-search-sources' },
-              sources.map((source, index) => h('li', { key: source.href, value: index + 1, className: 'dsh-ge-search-source-item' },
+        open && hasBody ? h('div', { className: 'dsh-gn-search-body', 'data-web': 'search' },
+          queries.length > 0 && h('div', { className: 'dsh-gn-search-section' },
+            h('div', { className: 'dsh-gn-search-section-label' }, t('activityQueries')),
+            h('div', { className: 'dsh-gn-search-queries' },
+              queries.map(query => h('span', { key: query, className: 'dsh-gn-search-query-tag' }, query)))),
+          sources.length > 0 && h('div', { className: 'dsh-gn-search-section' },
+            h('div', { className: 'dsh-gn-search-section-label' }, t('activitySources')),
+            h('ol', { className: 'dsh-gn-search-sources' },
+              sources.map((source, index) => h('li', { key: source.href, value: index + 1, className: 'dsh-gn-search-source-item' },
                 h('a', {
                   href: source.href,
                   target: '_blank',
                   rel: 'noopener noreferrer',
-                  className: 'dsh-ge-search-source-link',
+                  className: 'dsh-gn-search-source-link',
                 }, h(ExternalLinkIcon), source.title),
-                source.showHost && h('span', { className: 'dsh-ge-search-source-host' }, source.host)))))) : null)
+                source.showHost && h('span', { className: 'dsh-gn-search-source-host' }, source.host)))))) : null)
     }
 
     // The live composer and visible history rows share one stream per session.
@@ -1451,7 +1448,7 @@ button.dsh-ge-dock-pill:focus-visible {
       }
       function connect(sessionId, entry) {
         try {
-          const url = new URL('./api/dsh-gemini-enhancement/search-activity', document.baseURI)
+          const url = new URL('./api/dsh-gemini-native/search-activity', document.baseURI)
           if (url.origin !== window.location.origin) return
           url.searchParams.set('sessionId', sessionId)
           const source = new EventSource(url.href)
@@ -1507,7 +1504,7 @@ button.dsh-ge-dock-pill:focus-visible {
     function xhighHooks(ctx) {
       const sessions = new Map()
       function resolveURL() {
-        const url = new URL('./api/dsh-gemini-enhancement/xhigh', document.baseURI)
+        const url = new URL('./api/dsh-gemini-native/xhigh', document.baseURI)
         if (url.origin !== window.location.origin) return null
         return url
       }
@@ -1622,24 +1619,27 @@ button.dsh-ge-dock-pill:focus-visible {
 
         function LiveSearchActivity({ sessionId, t }) {
           if (!useSearchActivity(sessionId)) return null
-          return h('span', { className: 'dsh-ge-dock-anchor' },
-            h('span', { role: 'status', className: 'dsh-ge-dock-pill' },
-              h('span', { className: 'dsh-ge-dock-label' }, t('activityLive'))))
+          return h('span', { className: 'dsh-gn-dock-anchor' },
+            h('span', { role: 'status', className: 'dsh-gn-dock-pill' },
+              h('span', { className: 'dsh-gn-dock-label' }, t('activityLive'))))
         }
 
         function TurnSearchCards({ sessionId, turn, t, useProjection }) {
           const turnNumber = typeof turn === 'number' ? turn : turn?.turn
           const durable = useProjection('geminiNativeSearchActivity', value => value?.[turnNumber] ?? noSearchCards)
           const temporary = useSearchActivity(sessionId, turnNumber)
-          const cards = durable.length ? durable : temporary
+          // The card deduplicates queries and links. Use the live cache as
+          // well when a retry or oversized attempt produced no durable card.
+          const cards = durable.length && temporary.length ? [...durable, ...temporary]
+            : durable.length ? durable : temporary
           return cards.length ? h(GoogleSearchCard, { cards, t }) : null
         }
 
-        function EnhancementNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
+        function NativeStatusNotice({ sessionId, useProjection, modelStore = emptyModelStore, t }) {
           const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
           const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
           const selected = useProjection('modelSelection', selection => selection?.next)
-          const rawDiag = useProjection('geminiEnhancementDiagnostics')
+          const rawDiag = useProjection('geminiNativeDiagnostics')
           const modelState = React.useSyncExternalStore(modelStore.subscribe, modelStore.getSnapshot)
           // The projection has no saved choice in a new chat using the profile
           // default. Use the same directory as the picker for that fallback.
@@ -1648,9 +1648,11 @@ button.dsh-ge-dock-pill:focus-visible {
           const provider = selectedObj?.provider ?? legacyProvider ?? modelState?.current?.provider
           const model = selectedObj?.model ?? modelState?.current?.model
 
-          const ready = snapshot.status === 'ready' && snapshot.value?.showStatusNotice === true && Boolean(sessionId) && Boolean(provider)
+          const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
+          const ready = snapshot.status === 'ready' && snapshot.value?.showStatusNotice !== false
+            && Boolean(sessionId) && isGeminiProfile(provider, profile)
           const routeCfg = ready ? routeEntryOf(snapshot.value?.routes, provider) : emptyRouteEntry
-          const active = ready && hasAnyEnhancement(routeCfg)
+          const active = ready && hasAnyNativeFeature(routeCfg)
 
           const telemetry = useStatusTelemetry(active ? sessionId : null)
           const xhighEligible = active && supportsXHighModel(model)
@@ -1662,17 +1664,18 @@ button.dsh-ge-dock-pill:focus-visible {
           const diag = rawDiag && typeof rawDiag === 'object' && !Array.isArray(rawDiag) ? rawDiag : null
           const localized = telemetry.localizedProvider === provider
           const activePrompt = telemetry.prompt?.provider === provider ? telemetry.prompt : null
-          const activeTransport = telemetry.transport?.provider === provider ? telemetry.transport : null
+          const activeTransport = telemetry.transport?.provider === provider
+            && (!model || telemetry.transport.model === model) ? telemetry.transport : null
 
           const segments = [
-            routeCfg.localizePrompt && t(localized ? 'statusLocalized' : 'statusMatched'),
+            routeCfg.localizePrompt && t(localized ? 'statusLocalized' : 'statusLocalizationOn'),
             routeCfg.nativeHistory && t('statusNativeHistory'),
             routeCfg.googleSearch && t('statusGoogleSearch'),
           ].filter(Boolean)
           const summaryText = segments.join(' · ')
           const labelChildren = []
           segments.forEach((seg, index) => {
-            if (index > 0) labelChildren.push(h('span', { key: `sep-${index}`, className: 'dsh-ge-dock-sep', 'aria-hidden': 'true' }, '·'))
+            if (index > 0) labelChildren.push(h('span', { key: `sep-${index}`, className: 'dsh-gn-dock-sep', 'aria-hidden': 'true' }, '·'))
             labelChildren.push(seg)
           })
 
@@ -1682,7 +1685,6 @@ button.dsh-ge-dock-pill:focus-visible {
           const canPortal = open && typeof ReactDOM?.createPortal === 'function' && typeof document !== 'undefined' && Boolean(document.body)
           let dialogPortal = null
           if (canPortal) {
-            const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
             const providerLabel = profile?.displayName || provider
             const modelLabel = activeTransport?.model || model
             const routeLabel = modelLabel ? `${providerLabel} / ${modelLabel}` : providerLabel
@@ -1705,27 +1707,27 @@ button.dsh-ge-dock-pill:focus-visible {
             dialogPortal = ReactDOM.createPortal(
               h('div', {
                 ref: panelRef,
-                className: 'dsh-ge-diag-panel',
+                className: 'dsh-gn-diag-panel',
                 role: 'dialog',
                 'aria-label': t('brand'),
                 style: panelStyle,
               },
-              h('div', { className: 'dsh-ge-diag-title' },
-                h('span', { className: 'dsh-ge-diag-title-label' },
+              h('div', { className: 'dsh-gn-diag-title' },
+                h('span', { className: 'dsh-gn-diag-title-label' },
                   h(GeminiMark, { size: 14, strokeWidth: 1.6 }),
                   h('span', null, t('brand'))),
-                h('span', { className: 'dsh-ge-diag-route', title: routeLabel }, routeLabel)),
-              h('div', { className: 'dsh-ge-diag-rule', 'aria-hidden': 'true' }),
-              hasWarning ? h('div', { className: 'dsh-ge-diag-warns', role: 'alert' },
-                warnings.map((message, index) => h('div', { key: index, className: 'dsh-ge-diag-warn' }, message))) : null,
-              rows.length > 0 ? h('dl', { className: 'dsh-ge-diag-details' },
+                h('span', { className: 'dsh-gn-diag-route', title: routeLabel }, routeLabel)),
+              h('div', { className: 'dsh-gn-diag-rule', 'aria-hidden': 'true' }),
+              hasWarning ? h('div', { className: 'dsh-gn-diag-warns', role: 'alert' },
+                warnings.map((message, index) => h('div', { key: index, className: 'dsh-gn-diag-warn' }, message))) : null,
+              rows.length > 0 ? h('dl', { className: 'dsh-gn-diag-details' },
                 rows.map(row => h(React.Fragment, { key: row.key },
                   h('dt', null, row.label),
                   h('dd', null,
                     h('span', null, row.value),
-                    row.sub ? h('div', { className: 'dsh-ge-diag-sub' }, row.sub) : null)))) : null,
+                    row.sub ? h('div', { className: 'dsh-gn-diag-sub' }, row.sub) : null)))) : null,
               !hasLiveTelemetry && !hasDurableStats
-                ? h('p', { className: 'dsh-ge-diag-hint' }, t('diagEmptyHint'))
+                ? h('p', { className: 'dsh-gn-diag-hint' }, t('diagEmptyHint'))
                 : null),
               document.body,
             )
@@ -1733,20 +1735,20 @@ button.dsh-ge-dock-pill:focus-visible {
 
           return h('span', {
             ref: rootRef,
-            className: 'dsh-ge-dock-anchor',
+            className: 'dsh-gn-dock-anchor',
             style: supportsAnchor ? { anchorName } : undefined,
           },
           h('button', {
             type: 'button',
-            className: 'dsh-ge-dock-pill',
+            className: 'dsh-gn-dock-pill',
             'aria-haspopup': 'dialog',
             'aria-expanded': open,
             'aria-label': hasWarning ? `${summaryText} (${t('diagWarningBadge')})` : summaryText,
             onClick: () => setOpen(prev => !prev),
           },
           h(GeminiMark, { size: 14, strokeWidth: 1.6 }),
-          h('span', { className: 'dsh-ge-dock-label' }, ...labelChildren),
-          hasWarning ? h('span', { className: 'dsh-ge-dock-warn-dot', 'aria-hidden': 'true' }) : null),
+          h('span', { className: 'dsh-gn-dock-label' }, ...labelChildren),
+          hasWarning ? h('span', { className: 'dsh-gn-dock-warn-dot', 'aria-hidden': 'true' }) : null),
           dialogPortal)
         }
 
@@ -1847,19 +1849,19 @@ button.dsh-ge-dock-pill:focus-visible {
           const label = t('xhighOptionLabel')
           const tooltip = t('xhighOptionTitle')
           const disabled = Boolean(locked) || busy || removed
-          return h('div', { className: 'dsh-ge-model-opt-row', title: tooltip },
-            h('span', { className: 'dsh-ge-model-opt-label' }, label),
+          return h('div', { className: 'dsh-gn-model-opt-row', title: tooltip },
+            h('span', { className: 'dsh-gn-model-opt-label' }, label),
             h('button', {
               type: 'button',
               role: 'switch',
-              className: 'dsh-ge-model-opt-switch',
+              className: 'dsh-gn-model-opt-switch',
               'aria-checked': enabled,
               'aria-label': label,
               'aria-busy': busy || undefined,
               title: tooltip,
               disabled,
               onClick: () => setEnabled(!enabled),
-            }, h('span', { className: 'dsh-ge-model-opt-thumb', 'aria-hidden': 'true' })))
+            }, h('span', { className: 'dsh-gn-model-opt-thumb', 'aria-hidden': 'true' })))
         }
 
         function XHighActiveChip({
@@ -1885,10 +1887,10 @@ button.dsh-ge-dock-pill:focus-visible {
           if (!eligible || !enabled) return null
 
           const tooltip = t('xhighOnTitle')
-          return h('span', { className: 'dsh-ge-xhigh-wrap' },
+          return h('span', { className: 'dsh-gn-xhigh-wrap' },
             h('button', {
               type: 'button',
-              className: 'dsh-ge-xhigh',
+              className: 'dsh-gn-xhigh',
               'aria-busy': busy || undefined,
               'aria-label': tooltip,
               title: tooltip,
@@ -1899,17 +1901,17 @@ button.dsh-ge-dock-pill:focus-visible {
                 return setEnabled(false)
               },
             },
-            h('span', { className: 'dsh-ge-xhigh-glyph', 'aria-hidden': 'true' },
-              h(GeminiMark, { size: 14, strokeWidth: 1.6, className: 'dsh-ge-xhigh-rest-glyph' }),
-              h(CloseCircleFillIcon, { className: 'dsh-ge-xhigh-hover-glyph' })),
+            h('span', { className: 'dsh-gn-xhigh-glyph', 'aria-hidden': 'true' },
+              h(GeminiMark, { size: 14, strokeWidth: 1.6, className: 'dsh-gn-xhigh-rest-glyph' }),
+              h(CloseCircleFillIcon, { className: 'dsh-gn-xhigh-hover-glyph' })),
             h('span', null, t('xhighLabel'))),
-            failed ? h('span', { className: 'dsh-ge-xhigh-error', role: 'status' }, t('xhighToggleFailed')) : null)
+            failed ? h('span', { className: 'dsh-gn-xhigh-error', role: 'status' }, t('xhighToggleFailed')) : null)
         }
 
         ctx.effect(() => ctx.locale.register(namespace, { en, zh }))
         ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
           name: 'settings.models.provider-card', key: 'llm-pi-ai', locale: namespace,
-        }, props => h(ProviderCardEnhancements, {
+        }, props => h(ProviderCardNativeOptions, {
           ...props,
           configForm: config,
           subscribeConfig: subscribe,
@@ -1941,7 +1943,7 @@ button.dsh-ge-dock-pill:focus-visible {
           scope.slots.inject('conversation.composer.dock', () => scope.slots.register({
             name: 'conversation.composer.dock', id: `${pluginId}-notice`, order: 2, locale: namespace,
             inject: injectModelStore,
-          }, EnhancementNotice))
+          }, NativeStatusNotice))
           scope.slots.inject('conversation.input.model.options', () => scope.slots.register({
             name: 'conversation.input.model.options', id: `${pluginId}-xhigh`, order: -10, locale: namespace,
             inject: injectXHighContext,

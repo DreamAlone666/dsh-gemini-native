@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.26.0
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install the tested DSH runtime
+        run: npm install --prefix "$RUNNER_TEMP/dsh-runtime" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.2
+      - name: Run offline integration tests
+        run: DSH_INSTALL_DIR="$RUNNER_TEMP/dsh-runtime/node_modules/@deepseek-ai/dsh" pnpm test:integration
+      - name: Check the distribution manifest
+        run: npm pack --dry-run --offline --ignore-scripts

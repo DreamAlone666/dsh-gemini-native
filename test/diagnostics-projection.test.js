@@ -74,7 +74,7 @@ function makeNativeMessageEvent({
 }
 
 test('metadata, reference stability on ignored events, and WeakMap view caching', () => {
-  assert.equal(diagnosticsProjectionKey, 'geminiEnhancementDiagnostics')
+  assert.equal(diagnosticsProjectionKey, 'geminiNativeDiagnostics')
   assert.equal(diagnosticsProjection.key, diagnosticsProjectionKey)
   assert.equal(diagnosticsProjection.stateVersion, 1)
   assert.equal(diagnosticsProjection.wire.summary, false)
@@ -99,6 +99,7 @@ test('metadata, reference stability on ignored events, and WeakMap view caching'
   assert.strictEqual(view1, view2)
   assert.equal('systems' in view1, false)
   assert.equal('lastNativeRoute' in view1, false)
+  assert.equal('lastNativeModel' in view1, false)
 
   const next = apply(initial, {
     type: 'system/message',
@@ -261,7 +262,6 @@ test('assistant/message tracks native continuity, breaks, v2 pi-ai embedded payl
   assert.equal(state.nativeBytes, expectedBytes1)
   assert.equal(state.lastNativeRoute, routeA.identity)
   assert.equal(state.lastNativeModel, modelA)
-  assert.equal(state.lastNativeOutcome, 'complete')
   assert.equal(state.searchCards, 1)
   assert.equal(state.searchQueries, 2)
   assert.equal(state.searchSources, 1)
@@ -299,7 +299,6 @@ test('assistant/message tracks native continuity, breaks, v2 pi-ai embedded payl
   assert.equal(state.nativeSteps, 3)
   assert.equal(state.consecutiveNative, 1)
   assert.equal(state.lastNativeModel, modelB)
-  assert.equal(state.lastNativeOutcome, 'truncated')
 
   // Step 4: switching route resets consecutiveNative to 1 even on same model.
   const event4 = makeNativeMessageEvent({
@@ -403,8 +402,6 @@ test('assistant/message tracks native continuity, breaks, v2 pi-ai embedded payl
     consecutiveNative: 2,
     hasNativePayload: true,
     nativeBytes: state.nativeBytes,
-    lastNativeModel: modelB,
-    lastNativeOutcome: 'complete',
     searchCards: 2,
     searchQueries: 3,
     searchSources: 3,
@@ -465,7 +462,6 @@ test('stateSchema and viewSchema validate valid shapes and reject invalid data',
     nativeBytes: 512,
     lastNativeRoute: 'route-1',
     lastNativeModel: modelA,
-    lastNativeOutcome: 'complete',
     searchCards: 1,
     searchQueries: 2,
     searchSources: 3,
@@ -502,8 +498,6 @@ test('stateSchema and viewSchema validate valid shapes and reject invalid data',
     { consecutiveNative: null },
     { hasNativePayload: 1 },
     { nativeBytes: Infinity },
-    { lastNativeModel: 123 },
-    { lastNativeOutcome: false },
     { searchCards: -2 },
     { searchQueries: '0' },
     { searchSources: {} },
@@ -514,6 +508,7 @@ test('stateSchema and viewSchema validate valid shapes and reject invalid data',
   }
 
   assert.throws(() => stateSchema.parse({ ...validState, lastNativeRoute: 99 }))
+  assert.throws(() => stateSchema.parse({ ...validState, lastNativeModel: 123 }))
   assert.throws(() => stateSchema.parse({ ...validState, systems: 'bad' }))
   assert.throws(() => stateSchema.parse({ ...validState, systems: [null] }))
   assert.throws(() => stateSchema.parse({ ...validState, systems: [{ seq: -1, localized: true }] }))
