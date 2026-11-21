@@ -826,10 +826,11 @@ button.dsh-gn-dock-pill:focus-visible {
       return providerId === 'google' && profile.api === undefined
     }
 
-    // Same outline as the bundle icon, cropped for inline marks.
+    // Monochrome companion to the bundle icon: centered star + upper-right cross sparkle.
     function GeminiMark({ label, size = 14, strokeWidth = 1.6, className }) {
+      const plusStroke = Number(Math.max(1.2, strokeWidth * 0.88).toFixed(2))
       return h('svg', {
-        width: size, height: size, viewBox: '6 6 24 24', fill: 'none',
+        width: size, height: size, viewBox: '0 0 20 20', fill: 'none',
         stroke: 'currentColor', strokeWidth, strokeLinejoin: 'round',
         className,
         role: label ? 'img' : undefined,
@@ -837,8 +838,16 @@ button.dsh-gn-dock-pill:focus-visible {
         'aria-hidden': label ? undefined : 'true',
         focusable: 'false',
         style: { flexShrink: 0 },
-      }, label ? h('title', null, label) : null, h('path', {
-        d: 'M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z',
+      },
+      label ? h('title', null, label) : null,
+      h('path', {
+        d: 'M9.2 2.8C10.24 6.32 12.82 8.9 16.34 9.94C12.82 10.98 10.24 13.56 9.2 17.08C8.16 13.56 5.58 10.98 2.06 9.94C5.58 8.9 8.16 6.32 9.2 2.8Z',
+      }),
+      h('path', {
+        d: 'M16.1 2.2V5.6M14.4 3.9H17.8',
+        strokeWidth: plusStroke,
+        strokeLinecap: 'round',
+        strokeOpacity: 0.82,
       }))
     }
 

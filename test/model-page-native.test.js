@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import * as plugin from '../index.js'
-import { hasNativeReplay } from '../generate-content.js'
+import * as plugin from '../src/index.js'
+import { hasNativeReplay } from '../src/generate-content.js'
 
 const installed = process.env.DSH_INSTALL_DIR
 const routeId = 'offline-gemini-relay'

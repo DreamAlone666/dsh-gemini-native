@@ -5,12 +5,12 @@ import {
   historyFingerprint,
   makeNativeReplayData,
   makeReplayState,
-} from '../generate-content.js'
+} from '../src/generate-content.js'
 import {
   diagnosticsProjection,
   diagnosticsProjectionKey,
   isLocalizedSystemText,
-} from '../diagnostics-projection.js'
+} from '../src/diagnostics-projection.js'
 
 const routeA = { identity: 'route-a-sha256', googleSearch: true }
 const routeB = { identity: 'route-b-sha256', googleSearch: false }

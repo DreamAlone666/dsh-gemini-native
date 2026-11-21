@@ -3,36 +3,42 @@
   "version": "0.4.0",
   "private": true,
   "description": "Native Gemini API features for DeepSeek Harness: history replay, Google Search, XHigh, and Simplified Chinese system prompts.",
+  "author": "DreamAlone",
   "license": "MIT",
+  "homepage": "https://github.com/DreamAlone666/dsh-gemini-native#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DreamAlone666/dsh-gemini-native.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DreamAlone666/dsh-gemini-native/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "gemini",
+    "google-search"
+  ],
   "type": "module",
   "engines": {
     "node": ">=24.9.0",
     "dsh": ">=0.2.2-rc.2 <0.3.0"
   },
   "exports": {
-    ".": "./index.js",
+    ".": "./src/index.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./client": "./client.js",
+    "./client": "./src/client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
-    "client.js",
-    "tool-prompts.js",
-    "notice.js",
-    "gemini-transport.js",
-    "google-search-activity.js",
-    "google-search-sse.js",
-    "generate-content.js",
-    "native-search-projection.js",
-    "diagnostics-projection.js",
-    "web-search-scope.js",
-    "xhigh.js",
+    "src",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.19.0"

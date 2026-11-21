@@ -254,7 +254,7 @@ async function loadClient({
   withReactDom = true,
   supportsAnchor = true,
 } = {}) {
-  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
   const React = createReactStub({ trackSubscriptions })
   const PORTAL_TYPE = Symbol('Portal')
   const ReactDOM = withReactDom

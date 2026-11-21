@@ -3,8 +3,8 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import * as plugin from '../index.js'
-import { localizationNotice } from '../notice.js'
+import * as plugin from '../src/index.js'
+import { localizationNotice } from '../src/notice.js'
 
 const installed = process.env.DSH_INSTALL_DIR
 const URL = 'http://localhost/api/dsh-gemini-native/status?sessionId=session-a'

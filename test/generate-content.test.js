@@ -5,16 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import * as plugin from '../index.js'
-import { diagnosticsProjection } from '../diagnostics-projection.js'
-import { geminiTransport } from '../gemini-transport.js'
+import * as plugin from '../src/index.js'
+import { diagnosticsProjection } from '../src/diagnostics-projection.js'
+import { geminiTransport } from '../src/gemini-transport.js'
 import {
   attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, nativeReplayOf,
   normalizeEndpoint, patchGenerateContentBody, routeIdentity,
-} from '../generate-content.js'
-import { searchActivityPath } from '../google-search-activity.js'
-import { nativeSearchProjection } from '../native-search-projection.js'
-import { xhighPath } from '../xhigh.js'
+} from '../src/generate-content.js'
+import { searchActivityPath } from '../src/google-search-activity.js'
+import { nativeSearchProjection } from '../src/native-search-projection.js'
+import { xhighPath } from '../src/xhigh.js'
 
 const installed = process.env.DSH_INSTALL_DIR
 const model = 'gemini-4-hydrogen'

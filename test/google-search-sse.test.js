@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { observeGoogleSearchResponse } from '../google-search-sse.js'
+import { observeGoogleSearchResponse } from '../src/google-search-sse.js'
 
 const headers = { 'content-type': 'Text/Event-Stream; charset=utf-8', 'x-offline': 'preserved' }
 const event = candidate => `data: ${JSON.stringify({ candidates: [candidate] })}\n\n`

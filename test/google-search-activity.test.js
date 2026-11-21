@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { makeReplayState } from '../generate-content.js'
-import { googleSearchActivity, searchActivityPath } from '../google-search-activity.js'
+import { makeReplayState } from '../src/generate-content.js'
+import { googleSearchActivity, searchActivityPath } from '../src/google-search-activity.js'
 
 const session = { id: 'session-a' }
 const snapshotEmpty = { liveTurn: null, cards: [] }

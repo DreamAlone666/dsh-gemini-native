@@ -3,8 +3,8 @@ import { test } from 'node:test'
 import {
   attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, makeReplayState,
   nativeReplayOf, patchGenerateContentBody, readNativeReplay,
-} from '../generate-content.js'
-import { nativeSearchProjection } from '../native-search-projection.js'
+} from '../src/generate-content.js'
+import { nativeSearchProjection } from '../src/native-search-projection.js'
 
 const route = { identity: 'example-route', googleSearch: true }
 const model = 'gemini-test'

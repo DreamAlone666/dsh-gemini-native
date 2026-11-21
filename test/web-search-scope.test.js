@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import * as plugin from '../index.js'
-import { webSearchScope } from '../web-search-scope.js'
+import * as plugin from '../src/index.js'
+import { webSearchScope } from '../src/web-search-scope.js'
 
 const installed = process.env.DSH_INSTALL_DIR
 const bundleId = 'dsh-gemini-native'

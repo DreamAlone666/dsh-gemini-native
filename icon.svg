@@ -1,3 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none">
-  <path d="M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z" stroke="#74829A" stroke-width="2.5" stroke-linejoin="round" />
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dsh-gemini-native-star" x1="7.5" y1="9.5" x2="26.5" y2="29" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69BFFF" />
+      <stop offset="0.52" stop-color="#4A6DF0" />
+      <stop offset="1" stop-color="#6F5FE8" />
+    </linearGradient>
+    <linearGradient id="dsh-gemini-native-plus" x1="22.5" y1="6.5" x2="29.5" y2="13.5" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4CE2BE" />
+      <stop offset="1" stop-color="#42AEF0" />
+    </linearGradient>
+  </defs>
+  <path d="M16.8 8.4C18.3 13.55 21.25 16.5 27.4 19C21.25 21.5 18.3 24.45 16.8 29.6C15.3 24.45 12.35 21.5 6.2 19C12.35 16.5 15.3 13.55 16.8 8.4Z" fill="url(#dsh-gemini-native-star)" />
+  <path d="M26.2 6.8V12.8M23.2 9.8H29.2" stroke="url(#dsh-gemini-native-plus)" stroke-width="2.5" stroke-linecap="round" />
 </svg>
