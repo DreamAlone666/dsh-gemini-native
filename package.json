@@ -26,6 +26,7 @@
     "google-search-sse.js",
     "generate-content.js",
     "native-search-projection.js",
+    "xhigh.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

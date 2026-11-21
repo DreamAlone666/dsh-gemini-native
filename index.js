@@ -5,6 +5,7 @@ import { geminiTransport } from './gemini-transport.js'
 import { googleSearchActivity } from './google-search-activity.js'
 import { hasNativeReplay } from './generate-content.js'
 import { nativeSearchProjection } from './native-search-projection.js'
+import { xhighState } from './xhigh.js'
 
 export const inject = ['systemPrompt']
 
@@ -74,6 +75,7 @@ export function apply(ctx, config) {
   let observerFor
   let notice
   const reportFor = (sessionId, liveOnly = false) => observerFor?.reportFor(sessionId, liveOnly)
+  const xhigh = ctx.inject ? xhighState(ctx) : undefined
   ctx.inject?.(['sessionProjections'], child => {
     child.effect(async () => {
       const handle = await child.sessionProjections.register(nativeSearchProjection)
@@ -92,7 +94,7 @@ export function apply(ctx, config) {
       return native
     })
   })
-  ctx.inject?.(['llm', 'loader'], child => geminiTransport(child, config, routeConfigOf, reportFor))
+  ctx.inject?.(['llm', 'loader'], child => geminiTransport(child, config, routeConfigOf, reportFor, sessionId => xhigh.isEnabled(sessionId)))
   ctx.inject?.(['connection'], (child) => {
     notice = localizationNotice(child, config, routeConfigOf)
     observerFor = googleSearchActivity(child)

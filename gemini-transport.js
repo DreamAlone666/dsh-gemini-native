@@ -4,6 +4,7 @@ import {
   applyGoogleSearchTools, attachNativeReplay, isObject, makeNativeReplayData, normalizeEndpoint,
   patchGenerateContentBody, responseFrame, routeIdentity, selectedCandidate,
 } from './generate-content.js'
+import { applyXHighThinking, supportsXHighModel } from './xhigh.js'
 
 const nativeFrameLimit = 1024 * 1024
 const replayLimit = 2 * 1024 * 1024
@@ -116,7 +117,7 @@ function loopRequestPredicate(ctx) {
   }
 }
 
-export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
+export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled) {
   const scope = new AsyncLocalStorage()
   let active = true
   let transport
@@ -151,7 +152,9 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
               if (route) {
                 const patched = patchGenerateContentBody(parsed, state.request, route)
                 if (patched) {
-                  const forwarded = patched.changed ? replaceBody(init, JSON.stringify(patched.body)) : init
+                  const thinkingPatched = applyXHighThinking(patched.body, state.xhigh)
+                  const changed = patched.changed || thinkingPatched.changed
+                  const forwarded = changed ? replaceBody(init, JSON.stringify(thinkingPatched.body)) : init
                   const capture = { route, prefix: patched.prefix, frames: [], savedBytes: 0, overflow: false, invalid: false }
                   state.capture = capture
                   const report = reportFor?.(state.sessionId, true)
@@ -174,11 +177,12 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
                   }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
                 }
               }
-            } else if (state.googleSearch) {
-              const patched = applyGoogleSearchTools(parsed, true)
-              if (patched.changed) {
-                const forwarded = replaceBody(init, JSON.stringify(patched.body))
-                const report = reportFor?.(state.sessionId, false)
+            } else if (state.googleSearch || state.xhigh) {
+              const toolsPatched = applyGoogleSearchTools(parsed, state.googleSearch)
+              const thinkingPatched = applyXHighThinking(toolsPatched.body, state.xhigh)
+              if (toolsPatched.changed || thinkingPatched.changed) {
+                const forwarded = replaceBody(init, JSON.stringify(thinkingPatched.body))
+                const report = toolsPatched.changed ? reportFor?.(state.sessionId, false) : undefined
                 const result = previous.call(this, input, forwarded)
                 return report ? Promise.resolve(result).then(response => {
                   try { return observeGoogleSearchResponse(response, report) } catch { return response }
@@ -201,7 +205,8 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
     let state
     if (active && request.purpose === undefined && request.sessionId !== undefined) {
       const routeCfg = routeConfigOf(config.routes.get(), request.provider)
-      if (routeCfg.nativeHistory || routeCfg.googleSearch) {
+      const xhigh = isXHighEnabled?.(request.sessionId) === true && supportsXHighModel(request.model)
+      if (routeCfg.nativeHistory || routeCfg.googleSearch || xhigh) {
         // Use the mounted LLM module's identity predicate, not a second import
         // whose marker WeakSet might belong to a different module generation.
         const isAgentLoopRequest = loopRequestPredicate(ctx)
@@ -211,6 +216,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor) {
           state = {
             nativeHistory: routeCfg.nativeHistory,
             googleSearch: routeCfg.googleSearch,
+            xhigh,
             provider: request.provider,
             model: request.model,
             sessionId: request.sessionId,

@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
       activityQueries: 'Search queries',
       activitySourceCount: 'Sources',
       activitySources: 'Sources returned by Google (links open in a new tab)',
+      xhighLabel: 'XHigh',
+      xhighOffTitle: 'Override reasoning level to XHigh for this session (Neon / Hydrogen) without changing the native effort setting',
+      xhighOnTitle: 'XHigh is active for this session (overriding the selected effort); click to restore',
     }
 
     const zh = {
@@ -82,6 +85,9 @@ window.__ModuleLoader__.load({
       activityQueries: '搜索词',
       activitySourceCount: '来源',
       activitySources: 'Google 返回的来源（在新标签页打开）',
+      xhighLabel: 'XHigh',
+      xhighOffTitle: '在当前会话将推理等级覆盖为 XHigh（Neon / Hydrogen），不改变原生档位',
+      xhighOnTitle: '当前会话已开启 XHigh（覆盖当前所选档位），点击恢复原档位',
     }
 
     const secondary = { margin: 0, color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: 1.5 }
@@ -141,6 +147,27 @@ window.__ModuleLoader__.load({
       lineHeight: '16px',
       color: 'var(--dsw-alias-label-secondary)',
     }
+    const xhighButtonBase = {
+      boxSizing: 'border-box',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+      height: 28,
+      padding: '0 8px',
+      borderRadius: 'var(--dsw-radius-sm, 8px)',
+      font: 'inherit',
+      fontSize: 12,
+      lineHeight: '18px',
+      whiteSpace: 'nowrap',
+      flexShrink: 0,
+      userSelect: 'none',
+      transition: 'background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease',
+    }
+
+    function supportsXHighModel(model) {
+      return typeof model === 'string' && /^(?:models\/)?gemini-4-(?:neon|hydrogen)(?:$|[-.@])/iu.test(model)
+    }
 
     function routeEntryOf(routes, providerId) {
       const entry = typeof providerId === 'string' && providerId.length > 0 && routes && Object.hasOwn(routes, providerId)
@@ -173,7 +200,11 @@ window.__ModuleLoader__.load({
       return h('svg', {
         width: size, height: size, viewBox: '6 6 24 24', fill: 'none',
         stroke: 'currentColor', strokeWidth: 2.5, strokeLinejoin: 'round',
-        role: 'img', 'aria-label': label, focusable: 'false', style: { flexShrink: 0 },
+        role: label ? 'img' : undefined,
+        'aria-label': label,
+        'aria-hidden': label ? undefined : 'true',
+        focusable: 'false',
+        style: { flexShrink: 0 },
       }, label ? h('title', null, label) : null, h('path', {
         d: 'M18 8.5C19.4 13.4 22.6 16.6 27.5 18C22.6 19.4 19.4 22.6 18 27.5C16.6 22.6 13.4 19.4 8.5 18C13.4 16.6 16.6 13.4 18 8.5Z',
       }))
@@ -547,7 +578,94 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // Session-level XHigh toggle state synced via SSE + POST without touching native modelSelection.
+    function xhighHooks(ctx) {
+      const sessions = new Map()
+      function resolveURL() {
+        const url = new URL('./api/dsh-gemini-enhancement/xhigh', document.baseURI)
+        if (url.origin !== window.location.origin) return null
+        return url
+      }
+      function publish(entry, enabled) {
+        const next = enabled === true
+        if (entry.value === next) return
+        entry.value = next
+        for (const changed of entry.listeners) changed()
+      }
+      function connect(sessionId, entry) {
+        try {
+          const url = resolveURL()
+          if (!url) return
+          url.searchParams.set('sessionId', sessionId)
+          const source = new EventSource(url.href)
+          entry.source = source
+          source.onmessage = ({ data }) => {
+            try {
+              const parsed = JSON.parse(data)
+              if (typeof parsed?.enabled === 'boolean') publish(entry, parsed.enabled)
+            } catch { /* A bad xhigh frame must not affect chat. */ }
+          }
+          source.onerror = () => { /* EventSource reconnects automatically and Host pushes current state. */ }
+        } catch { /* Chat remains available without the xhigh route. */ }
+      }
+      function close(entry) {
+        if (!entry.source) return
+        entry.source.onmessage = entry.source.onerror = null
+        entry.source.close()
+        entry.source = null
+      }
+      ctx.effect(() => () => {
+        for (const entry of sessions.values()) close(entry)
+        sessions.clear()
+      })
+      function useXHigh(sessionId) {
+        const get = React.useCallback(() => (
+          sessionId ? (sessions.get(sessionId)?.value === true) : false
+        ), [sessionId])
+        const subscribe = React.useCallback(listener => {
+          if (!sessionId) return () => {}
+          let entry = sessions.get(sessionId)
+          if (!entry) {
+            entry = { listeners: new Set(), value: false, source: null }
+            sessions.set(sessionId, entry)
+            connect(sessionId, entry)
+          }
+          entry.listeners.add(listener)
+          return () => {
+            entry.listeners.delete(listener)
+            if (entry.listeners.size === 0) {
+              close(entry)
+              if (sessions.get(sessionId) === entry) sessions.delete(sessionId)
+            }
+          }
+        }, [sessionId])
+        return React.useSyncExternalStore(subscribe, get)
+      }
+      async function setXHigh(sessionId, enabled) {
+        if (!sessionId) return false
+        try {
+          const url = resolveURL()
+          if (!url) return false
+          const response = await fetch(url.href, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId, enabled: enabled === true }),
+          })
+          if (!response?.ok) return false
+          const payload = await response.json()
+          if (typeof payload?.enabled !== 'boolean') return false
+          const entry = sessions.get(sessionId)
+          if (entry) publish(entry, payload.enabled)
+          return true
+        } catch {
+          return false
+        }
+      }
+      return { useXHigh, setXHigh }
+    }
+
     const emptyModelStore = { subscribe: () => () => {}, getSnapshot: () => undefined }
+    const emptyHook = () => undefined
 
     return {
       inject: ['slots', 'locale', 'configForms'],
@@ -556,6 +674,7 @@ window.__ModuleLoader__.load({
         const subscribe = config.subscribe.bind(config)
         const getSnapshot = config.getSnapshot.bind(config)
         const useSearchActivity = searchActivityHooks(ctx)
+        const { useXHigh, setXHigh } = xhighHooks(ctx)
         const modelsForm = ctx.configForms.get('llm-pi-ai')
         const subscribeModels = modelsForm.subscribe.bind(modelsForm)
         const getModels = modelsForm.getSnapshot.bind(modelsForm)
@@ -603,6 +722,103 @@ window.__ModuleLoader__.load({
           }, h(GeminiMark, { label: t('source') }), h('span', null, extraLabels.join(' · ')))
         }
 
+        function XHighToggle({
+          sessionId,
+          useProjection,
+          useSession = emptyHook,
+          useSessions = emptyHook,
+          modelStore = emptyModelStore,
+          modelSelectionAvailable = true,
+          t,
+        }) {
+          const isSubagent = useSession(snapshot => snapshot?.subagent != null) === true
+          const removed = useSession(snapshot => snapshot?.removed === true) === true
+          const isListedSubagent = useSessions(state => state?.byId?.[sessionId]?.origin === 'subagent') === true
+          const selected = useProjection('modelSelection', selection => selection?.next)
+          const modelState = React.useSyncExternalStore(modelStore.subscribe, modelStore.getSnapshot)
+          const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
+
+          const provider = selected?.provider ?? modelState?.current?.provider
+          const model = selected?.model ?? modelState?.current?.model
+          const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
+          const isGeminiRoute = Boolean(provider) && (
+            modelsSnap.status === 'ready'
+              ? isGeminiProfile(provider, profile)
+              : provider === 'google'
+          )
+          const eligible = Boolean(sessionId)
+            && modelSelectionAvailable !== false
+            && !isSubagent
+            && !isListedSubagent
+            && isGeminiRoute
+            && supportsXHighModel(model)
+
+          const enabled = useXHigh(eligible ? sessionId : null)
+          const [busy, setBusy] = React.useState(false)
+          const [hovered, setHovered] = React.useState(false)
+          const busyRef = React.useRef(false)
+          const activeRef = React.useRef(true)
+          const reqSeqRef = React.useRef(0)
+
+          React.useEffect(() => {
+            activeRef.current = true
+            return () => { activeRef.current = false }
+          }, [])
+
+          React.useEffect(() => {
+            reqSeqRef.current += 1
+            busyRef.current = false
+            setBusy(false)
+          }, [sessionId])
+
+          const disabled = busy || removed
+          const onToggle = React.useCallback(async () => {
+            if (busyRef.current || removed || !sessionId) return
+            const reqSeq = ++reqSeqRef.current
+            busyRef.current = true
+            setBusy(true)
+            try {
+              await setXHigh(sessionId, !enabled)
+            } finally {
+              if (reqSeqRef.current === reqSeq) {
+                busyRef.current = false
+                if (activeRef.current) setBusy(false)
+              }
+            }
+          }, [sessionId, enabled, removed])
+
+          if (!eligible) return null
+
+          const tooltip = t(enabled ? 'xhighOnTitle' : 'xhighOffTitle')
+          return h('button', {
+            type: 'button',
+            'aria-pressed': enabled,
+            'aria-busy': busy || undefined,
+            'aria-label': tooltip,
+            title: tooltip,
+            disabled,
+            onMouseDown: event => event.preventDefault(),
+            onMouseEnter: () => setHovered(true),
+            onMouseLeave: () => setHovered(false),
+            onClick: onToggle,
+            style: {
+              ...xhighButtonBase,
+              border: enabled
+                ? '0.5px solid var(--dsw-alias-state-business-primary)'
+                : '0.5px solid var(--dsw-alias-border-l3)',
+              background: enabled
+                ? (hovered && !disabled
+                  ? 'color-mix(in srgb, var(--dsw-alias-state-business-tertiary), var(--dsw-alias-state-business-primary) 8%)'
+                  : 'var(--dsw-alias-state-business-tertiary)')
+                : (hovered && !disabled ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent'),
+              color: enabled ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-label-secondary)',
+              fontWeight: enabled ? 500 : 400,
+              opacity: disabled ? 0.65 : 1,
+              cursor: disabled ? 'default' : 'pointer',
+            },
+          }, h(GeminiMark, { size: 12 }), h('span', null, t('xhighLabel')))
+        }
+
         ctx.effect(() => ctx.locale.register(namespace, { en, zh }))
         ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
           name: 'settings.models.provider-card', key: 'llm-pi-ai', locale: namespace,
@@ -625,14 +841,23 @@ window.__ModuleLoader__.load({
         }, TurnSearchCards))
         ctx.inject(['modelDirectories'], scope => {
           const models = scope.modelDirectories
+          const sessions = scope.get?.('sessions') ?? scope.sessions
+          const injectModelStore = sessionId => {
+            if (!sessionId) return {}
+            try { return { modelStore: models.directoryFor(sessionId).store } }
+            catch { return {} }
+          }
           scope.slots.inject('conversation.composer.dock', () => scope.slots.register({
             name: 'conversation.composer.dock', id: `${pluginId}-notice`, order: 2, locale: namespace,
-            inject: sessionId => {
-              if (!sessionId) return {}
-              try { return { modelStore: models.directoryFor(sessionId).store } }
-              catch { return {} }
-            },
+            inject: injectModelStore,
           }, EnhancementNotice))
+          scope.slots.inject('conversation.input.right', () => scope.slots.register({
+            name: 'conversation.input.right', id: `${pluginId}-xhigh`, order: 100, locale: namespace,
+            inject: sessionId => ({
+              ...injectModelStore(sessionId),
+              modelSelectionAvailable: !sessionId || sessions?.subagentAddress?.(sessionId) === undefined,
+            }),
+          }, XHighToggle))
         })
       },
     }
