@@ -211,6 +211,8 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
       let baseURL
       try { baseURL = normalizeEndpoint(state.baseURL) } catch { return }
       route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
+      // Preserve the v1/v2 route label for stored diagnostics. The patcher
+      // admits history by provider + model; baseURL selects the current request.
       route.identity = routeIdentity(route)
       history = patchGenerateContentBody(body, state.request, route)
     }

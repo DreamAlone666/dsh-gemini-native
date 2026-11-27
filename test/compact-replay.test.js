@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, makeReplayState,
-  nativeReplayOf, patchGenerateContentBody, readNativeReplay,
+  nativeReplayOf, patchGenerateContentBody, readNativeReplay, routeIdentity,
 } from '../src/generate-content.js'
 import { nativeSearchProjection } from '../src/native-search-projection.js'
 
@@ -19,7 +19,7 @@ const parts = [
   { futureType: { nested: null }, text: blocks[0].text, thoughtSignature: 'first-signature' },
   { thought: true, thoughtSignature: 'reasoning-signature', text: blocks[1].text },
   { toolCall: { id: 'native-search', toolType: 'GOOGLE_SEARCH_WEB', args: { query: 'query one' } }, thoughtSignature: 'native-tool' },
-  { futurePart: [1, '😀'], text: '' },
+  { futurePart: [1, '😀'], thought: true, text: '' },
   { functionCall: { wireMetadata: ['future'], name: blocks[2].name, id: 'wire-read-9', args: JSON.parse(blocks[2].arguments) }, thoughtSignature: 'function-call' },
   { empty: null, text: blocks[3].text },
   { toolResponse: { id: 'native-search', toolType: 'GOOGLE_SEARCH_WEB', response: { results: [{ url: 'https://example.org/source' }] } } },
@@ -260,6 +260,41 @@ test('slice refs compact multi-frame streamed text/reasoning, reject bad slices,
   )
 })
 
+test('signed-empty parts open v2 text runs without consuming or merging the adjacent slices', () => {
+  const r1 = 'First thought chunk. '.repeat(32)
+  const r2 = 'Second thought chunk. '.repeat(32)
+  const r3 = 'A distinct thought run. '.repeat(32)
+  const call = { type: 'tool-call', name: 'read_mock', id: localId, arguments: '{"path":"a.txt"}' }
+  const raw = [
+    { text: '', thoughtSignature: 'leading-empty' },
+    { thought: true, text: r1 },
+    { thought: true, text: '', thoughtSignature: 'same-run-empty' },
+    { thought: true, text: r2 },
+    { text: '', thoughtSignature: 'after-thought-empty' },
+    { thought: true, text: r3 },
+    { functionCall: { name: call.name, args: JSON.parse(call.arguments) }, thoughtSignature: 'call' },
+    { text: '', thoughtSignature: 'after-function-call-empty' },
+  ]
+  const normalized = [
+    { type: 'text', text: '' }, { type: 'reasoning', text: r1 + r2 },
+    { type: 'text', text: '' }, { type: 'reasoning', text: r3 }, call, { type: 'text', text: '' },
+  ]
+  const rawFrames = raw.map(part => [selected([part])])
+  const envelope = makeReplayState(route, model, rawFrames, [localId], 'complete', prefix, normalized)
+  assert.equal(envelope.response.version, 2)
+  assert.ok(envelope.response.digest)
+  assert.deepEqual(envelope.response.refs.filter(ref => ref[4] === 1).map(ref => [ref[0], ref[3]]), [[1, 1], [3, 1], [5, 3]])
+  assert.deepEqual(readNativeReplay(clone(envelope), clone(normalized)).frames, rawFrames)
+  const out = patched(clone(envelope), clone(normalized))
+  assert.equal(out.replayedModelTurns, 1)
+  assert.deepEqual(out.body.contents[1].parts, raw)
+  assert.ok(!Object.hasOwn(out.body.contents[2].parts[0].functionResponse, 'id'))
+
+  const legacy = { response: { ...v1.response, frames: rawFrames } }
+  const olderBlocks = [{ type: 'reasoning', text: r1 + r2 + r3 }, call]
+  assert.deepEqual(patched(legacy, olderBlocks).body.contents[1].parts, raw, 'legacy grouped records may omit empty runs')
+})
+
 test('functionResponse ID is stripped when the original Gemini functionCall had no id', () => {
   const noIdCall = { functionCall: { name: 'read_mock', args: { path: 'a.txt' } }, thoughtSignature: 'sig-no-id' }
   const noIdFrames = [[selected([noIdCall], { finishReason: 'STOP' })]]
@@ -309,34 +344,267 @@ test('incremental prefixes keep the legacy JSON bytes across v1/v2 and multimoda
   }
 })
 
-test('prefix index recovers after a miss and keeps the first valid candidate after the cursor', () => {
-  const user = text => ({ role: 'user', parts: [{ text }] })
-  const assistant = (text, signature) => ({ role: 'model', parts: [{ text, ...signature && { thoughtSignature: signature } }] })
-  const record = (turn, digest) => message(makeReplayState(route, model, [[selected(turn.parts)]], [], 'complete', digest),
-    [{ type: 'text', text: turn.parts[0].text }])
-  const contents = [user('changed opening'), assistant('miss'), user('then resume'), assistant('hit'), user('next'), assistant('continues')]
-  const expected = [...contents]
-  expected[3] = assistant('hit', 'first-valid')
-  expected[5] = assistant('continues', 'after-cursor')
-  const resumePrefix = historyFingerprint(expected.slice(0, 3))
-  const nextPrefix = historyFingerprint(expected.slice(0, 5))
-  const wrongCallCount = message({ response: { ...v1.response, prefix: resumePrefix } })
-  const badFrame = record(assistant('hit', 'bad-frame'), resumePrefix)
-  badFrame.source.replayState.response.frames = [null]
-  const out = patchGenerateContentBody({ contents }, { provider: 'gemini', model, messages: [
-    record(assistant('miss', 'stale'), historyFingerprint([user('old opening')])),
-    record(assistant('continues', 'before-cursor'), nextPrefix),
-    wrongCallCount,
-    badFrame,
-    record(expected[3], resumePrefix),
-    record(assistant('hit', 'later-match'), resumePrefix),
-    record(expected[5], nextPrefix),
-  ] }, route)
-  assert.equal(out.totalModelTurns, 3)
+const userEntry = (...parts) => ({ role: 'user', parts: parts.map(part => typeof part === 'string' ? { text: part } : part) })
+const textEntry = (text, thoughtSignature) => ({ role: 'model', parts: [{ text, ...thoughtSignature && { thoughtSignature } }] })
+const geminiRequest = messages => ({ provider: 'gemini', model, messages })
+
+function recordedText(entry, prefix, recordedRoute = route) {
+  const content = [{ type: 'text', text: entry.parts[0].text }]
+  return message(makeReplayState(recordedRoute, model, [[selected(entry.parts)]], [], 'complete', prefix, content), content)
+}
+
+function historicalRoute(baseURL, googleSearch) {
+  const entry = { provider: 'gemini', baseURL, googleSearch }
+  return { ...entry, identity: routeIdentity(entry) }
+}
+
+test('changed prompt, pruned tool result, offloaded image, and compacted tail do not invalidate retained steps', () => {
+  const image = { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }
+  const opening = userEntry('Check this', image)
+  const [, wireCall, result] = wireBody(blocks).contents
+  const aligned = { ...result.parts[0].functionResponse, id: 'wire-read-9' }
+  const previousSystem = [{ text: 'Original system instructions' }]
+  const later = textEntry('Later retained reply. '.repeat(32), 'later-signature')
+  const normalizedLater = textEntry(later.parts[0].text)
+  const latestPrompt = userEntry('Next question')
+  const earlierRecord = message({ response: { ...v1.response, prefix: historyFingerprint([opening], previousSystem) } })
+  const laterRecord = recordedText(later, historyFingerprint([opening, { ...wireCall, parts }, userEntry({ functionResponse: aligned })], previousSystem))
+  assert.ok(laterRecord.source.replayState.response.refs.length > 0)
+
+  for (const [label, systemParts, first, feedback] of [
+    ['system prompt change', [{ text: 'New local or plan instructions' }], opening, result],
+    ['tool result pruned', previousSystem, opening, userEntry({ functionResponse: { ...result.parts[0].functionResponse, response: { output: '[Pruned]' } } })],
+    ['image offloaded', previousSystem, userEntry('Check this', '[Image offloaded]'), result],
+  ]) {
+    const contents = [first, wireCall, feedback, normalizedLater, latestPrompt]
+    const req = geminiRequest([
+      { role: 'user', content: first.parts.filter(part => part.text !== undefined).map(part => ({ type: 'text', text: part.text })) },
+      earlierRecord,
+      { role: 'tool', toolCallId: localId, content: [{ type: 'text', text: feedback.parts[0].functionResponse.response.output }] },
+      laterRecord,
+    ])
+    const out = patchGenerateContentBody({ contents, systemInstruction: { parts: systemParts } }, req, route)
+    assert.equal(out.replayedModelTurns, 2, label)
+    assert.deepEqual(out.body.contents, [first, { ...wireCall, parts }, userEntry({ functionResponse: { ...feedback.parts[0].functionResponse, id: 'wire-read-9' } }), later, latestPrompt], label)
+    assert.equal(out.prefix, historyFingerprint(out.body.contents, systemParts), label)
+  }
+
+  const summary = userEntry('Summary replacing earlier steps')
+  const newSummaryRequest = userEntry('Summarize the retained history')
+  const compacted = patchGenerateContentBody({ contents: [summary, normalizedLater, newSummaryRequest] },
+    { ...geminiRequest([laterRecord]), purpose: 'compaction' }, route)
+  assert.equal(compacted.replayedModelTurns, 1)
+  assert.deepEqual(compacted.body.contents, [summary, later, newSummaryRequest])
+})
+
+test('legacy v1/v2 replay survives a mirror change and Search only gates native-tool steps', () => {
+  const previousRoute = historicalRoute('https://old-mirror.test/v1beta', true)
+  const nextRoute = historicalRoute('https://new-mirror.test/v1beta', true)
+  const noSearch = historicalRoute(nextRoute.baseURL, false)
+  assert.notEqual(previousRoute.identity, nextRoute.identity)
+  assert.notEqual(nextRoute.identity, noSearch.identity)
+  const [opening, wireCall, wireResult] = wireBody().contents
+  const reply = textEntry('An ordinary signed response. '.repeat(32), 'reply-signature')
+  const normalizedReply = textEntry(reply.parts[0].text)
+  const legacy = message({ response: { ...v1.response, route: previousRoute.identity } })
+  const modern = recordedText(reply, prefix, previousRoute)
+  assert.ok(modern.source.replayState.response.refs.length > 0)
+  const contents = [opening, wireCall, wireResult, normalizedReply]
+  const request = geminiRequest([legacy, modern])
+
+  const on = patchGenerateContentBody({ contents }, request, nextRoute)
+  assert.equal(on.replayedModelTurns, 2)
+  assert.deepEqual(on.body.contents[1].parts, parts)
+  assert.deepEqual(on.body.contents[3], reply)
+
+  for (const [targetRoute, toolConfig] of [[noSearch, undefined], [nextRoute, { includeServerSideToolInvocations: false }]]) {
+    const out = patchGenerateContentBody({ contents, toolConfig }, request, targetRoute)
+    assert.equal(out.replayedModelTurns, 1)
+    assert.deepEqual(out.body.contents, [opening, wireCall, wireResult, reply])
+    if (toolConfig) assert.equal(out.body.toolConfig.includeServerSideToolInvocations, false)
+  }
+
+  const calling = { functionCallingConfig: { mode: 'AUTO' } }
+  const incompatible = patchGenerateContentBody({ contents, toolConfig: calling, tools: [{ functionDeclarations: [{ name: 'read_mock' }] }] }, request, nextRoute)
+  assert.equal(incompatible.replayedModelTurns, 1)
+  assert.deepEqual(incompatible.body.contents, [opening, wireCall, wireResult, reply])
+  assert.deepEqual(incompatible.body.toolConfig, calling, 'do not force server-tool circulation alongside AUTO')
+
+  for (const change of [{ provider: 'other' }, { model: 'other-model' }]) {
+    const out = patchGenerateContentBody({ contents }, { ...request, ...change }, noSearch)
+    assert.equal(out.replayedModelTurns, 0)
+    assert.strictEqual(out.body.contents, contents)
+  }
+})
+
+test('identical replies follow monotonic positions even with missing prefixes and omitted assistant entries', () => {
+  const opening = userEntry('Rewritten prompt')
+  const repeat = textEntry('Same reply')
+  const first = textEntry('Same reply', 'first-signature')
+  const second = textEntry('Same reply', 'second-signature')
+  const omitted = { role: 'assistant', content: [{ type: 'reasoning', text: 'Thinking stripped by pi-ai' }], source: { provider: 'other', model } }
+  const req = geminiRequest([recordedText(first, 'stale'), omitted, recordedText(second)])
+  const followup = userEntry('Follow up')
+  const out = patchGenerateContentBody({ contents: [opening, repeat, followup, repeat] }, req, route)
   assert.equal(out.replayedModelTurns, 2)
-  assert.strictEqual(out.body.contents[1], contents[1], 'a prefix miss does not modify the normalized turn')
-  assert.equal(JSON.stringify(out.body.contents), JSON.stringify(expected))
-  assert.equal(out.prefix, historyFingerprint(expected))
+  assert.deepEqual(out.body.contents, [opening, first, followup, second])
+})
+
+test('ambiguous reply stays normalized without taking a later turn out of the cursor', () => {
+  const opening = userEntry('Rewritten prompt')
+  const repeat = textEntry('Same reply')
+  const tail = textEntry('Unambiguous tail', 'tail-signature')
+  const normalizedTail = textEntry(tail.parts[0].text)
+  const lookalike = { role: 'assistant', content: [{ type: 'text', text: repeat.parts[0].text }], source: { provider: 'other', model } }
+  const out = patchGenerateContentBody({ contents: [opening, repeat, normalizedTail] }, geminiRequest([
+    recordedText(textEntry(repeat.parts[0].text, 'stale-signature'), 'stale'), lookalike, recordedText(tail, 'also-stale'),
+  ]), route)
+  assert.equal(out.replayedModelTurns, 1)
+  assert.deepEqual(out.body.contents, [opening, repeat, tail])
+})
+
+test('a signed-empty-only wire reply cannot be confused with omitted foreign reasoning', () => {
+  const wirePart = { text: '', thoughtSignature: 'empty-signature' }
+  const captured = { role: 'model', parts: [{ ...wirePart, opaqueField: { preserved: true } }] }
+  const omitted = { role: 'assistant', content: [{ type: 'reasoning', text: 'Not sent' }], source: { provider: 'other', model } }
+  const contents = [userEntry('Rewritten prompt'), { role: 'model', parts: [wirePart] }]
+  const out = patchGenerateContentBody({ contents }, geminiRequest([omitted, recordedText(captured, 'stale')]), route)
+  assert.equal(out.replayedModelTurns, 1)
+  assert.deepEqual(out.body.contents[1], captured)
+})
+
+test('only a unique structural match with an exact prefix breaks an alignment tie', () => {
+  const opening = userEntry('Exact prefix')
+  const exact = historyFingerprint([opening])
+  const repeat = textEntry('Same reply')
+  const first = textEntry('Same reply', 'first-signature')
+  const second = textEntry('Same reply', 'second-signature')
+  const contents = [opening, repeat]
+  const preferred = patchGenerateContentBody({ contents }, geminiRequest([recordedText(first, 'stale'), recordedText(second, exact)]), route)
+  assert.equal(preferred.replayedModelTurns, 1)
+  assert.deepEqual(preferred.body.contents, [opening, second])
+
+  const tied = patchGenerateContentBody({ contents }, geminiRequest([recordedText(first, exact), recordedText(second, exact)]), route)
+  assert.equal(tied.replayedModelTurns, 0)
+  assert.strictEqual(tied.body.contents, contents)
+
+  const signedContents = [opening, first]
+  const contradicted = patchGenerateContentBody({ contents: signedContents }, geminiRequest([
+    recordedText(first, 'stale'), recordedText(second, exact),
+  ]), route)
+  assert.equal(contradicted.replayedModelTurns, 0)
+  assert.strictEqual(contradicted.body.contents, signedContents, 'a prefix cannot override a contradictory wire signature')
+
+  const intervening = userEntry('Follow up')
+  const combined = [opening, repeat, intervening, repeat]
+  const revisited = patchGenerateContentBody({ contents: combined }, geminiRequest([
+    recordedText(first, 'stale-first'),
+    recordedText(second, historyFingerprint(combined.slice(0, 3))),
+    recordedText(textEntry('Same reply', 'last-signature'), 'stale-last'),
+  ]), route)
+  assert.equal(revisited.replayedModelTurns, 1)
+  assert.deepEqual(revisited.body.contents, [opening, repeat, intervening, second])
+})
+
+test('existing text signatures must belong to the same run, including across an omitted empty thought', () => {
+  const first = { text: 'First visible run', thoughtSignature: 'first-signature' }
+  const second = { text: 'Second visible run', thoughtSignature: 'second-signature' }
+  const raw = [first, { text: '', thought: true }, second]
+  const normalized = [{ type: 'text', text: first.text }, { type: 'reasoning', text: '' }, { type: 'text', text: second.text }]
+  const envelope = makeReplayState(route, model, [[selected(raw)]], [], 'complete', prefix, normalized)
+  const req = geminiRequest([message(envelope, normalized)])
+  const replay = patchGenerateContentBody({ contents: [userEntry('Check this'), { role: 'model', parts: [first, second] }] }, req, route)
+  assert.equal(replay.replayedModelTurns, 1)
+  assert.deepEqual(replay.body.contents[1].parts, raw)
+
+  const swapped = [{ role: 'model', parts: [
+    { ...first, thoughtSignature: second.thoughtSignature }, { ...second, thoughtSignature: first.thoughtSignature },
+  ] }]
+  const unchanged = patchGenerateContentBody({ contents: swapped }, req, route)
+  assert.equal(unchanged.replayedModelTurns, 0)
+  assert.strictEqual(unchanged.body.contents, swapped)
+})
+
+test('match call arguments and IDs and restore parallel results as one verified exchange', () => {
+  const makeCall = (id, path) => ({ functionCall: { id, name: 'read_mock', args: { path } } })
+  const a = makeCall('local-a', 'a.txt')
+  const b = makeCall('local-b', 'b.txt')
+  const nativeParts = [makeCall('native-a', 'a.txt'), makeCall('native-b', 'b.txt')]
+  const localBlocks = [a, b].map(({ functionCall: { id, name, args } }) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) }))
+  const fromNative = parts => geminiRequest([message(
+    makeReplayState(route, model, [[selected(parts)]], ['local-a', 'local-b'], 'complete', prefix, localBlocks), localBlocks,
+  )])
+  const req = fromNative(nativeParts)
+  const modelEntry = (...parts) => ({ role: 'model', parts })
+  const result = (id, output) => ({ functionResponse: { id, name: 'read_mock', response: { output } } })
+  const opening = userEntry('Check this')
+  const order = userEntry(result('local-b', 'b'), result('local-a', 'a'))
+  const out = patchGenerateContentBody({ contents: [opening, modelEntry(a, b), order] }, req, route)
+  assert.equal(out.replayedModelTurns, 1)
+  assert.deepEqual(out.body.contents, [opening, modelEntry(...nativeParts), userEntry(result('native-b', 'b'), result('native-a', 'a'))])
+
+  for (const sequence of [
+    [modelEntry(makeCall('local-a', 'changed.txt'), b), order],
+    [modelEntry(makeCall('foreign-a', 'a.txt'), b), order],
+    [modelEntry(b, a), order],
+    [modelEntry(a, b), userEntry(result('foreign-b', 'b'), result('local-a', 'a'))],
+  ]) {
+    const contents = [opening, ...sequence]
+    const unchanged = patchGenerateContentBody({ contents }, req, route)
+    assert.equal(unchanged.replayedModelTurns, 0)
+    assert.strictEqual(unchanged.body.contents, contents)
+  }
+
+  const signedCalls = modelEntry({ ...a, thoughtSignature: 'sig-a' }, { ...b, thoughtSignature: 'sig-b' })
+  const swappedNative = [{ ...nativeParts[0], thoughtSignature: 'sig-b' }, { ...nativeParts[1], thoughtSignature: 'sig-a' }]
+  const duplicateNativeIds = [makeCall('same-id', 'a.txt'), makeCall('same-id', 'b.txt')]
+  for (const [modelTurn, capture] of [[signedCalls, swappedNative], [modelEntry(a, b), duplicateNativeIds]]) {
+    const contents = [opening, modelTurn, order]
+    const unchanged = patchGenerateContentBody({ contents }, fromNative(capture), route)
+    assert.equal(unchanged.replayedModelTurns, 0)
+    assert.strictEqual(unchanged.body.contents, contents)
+  }
+})
+
+test('ID-less parallel results can be split by an image but cannot be guessed for native ID rebinding', () => {
+  const a = { functionCall: { name: 'read_mock', args: { path: 'a.txt' } } }
+  const b = { functionCall: { name: 'read_mock', args: { path: 'b.txt' } } }
+  const calls = [a, b]
+  const ids = ['local-a', 'local-b']
+  const localBlocks = calls.map(({ functionCall: { name, args } }, i) => ({ type: 'tool-call', id: ids[i], name, arguments: JSON.stringify(args) }))
+  const record = nativeParts => geminiRequest([message(
+    makeReplayState(route, model, [[selected(nativeParts)]], ids, 'complete', prefix, localBlocks), localBlocks,
+  )])
+  const modelTurn = { role: 'model', parts: calls }
+  const result = response => ({ functionResponse: { name: 'read_mock', response } })
+  // pi-ai can append a synthetic result for A after receiving B's result.
+  const ambiguous = [modelTurn, userEntry(result({ output: 'Result B' }), result({ error: 'No result provided' }))]
+  const nativeWithIds = calls.map((part, i) => ({ ...part, functionCall: { ...part.functionCall, id: `native-${i}` } }))
+  const unchanged = patchGenerateContentBody({ contents: ambiguous }, record(nativeWithIds), route)
+  assert.equal(unchanged.replayedModelTurns, 0)
+  assert.strictEqual(unchanged.body.contents, ambiguous)
+
+  const nativeWithoutIds = [{ ...a, thoughtSignature: 'signed-first-call' }, b]
+  const sentWithIds = { role: 'model', parts: calls.map((part, i) => ({ ...part, functionCall: { ...part.functionCall, id: ids[i] } })) }
+  const idResult = (i, response) => ({ functionResponse: { ...result(response).functionResponse, id: ids[i] } })
+  const responseB = { output: 'Result B' }
+  const missingA = { error: 'No result provided' }
+  const reversed = [sentWithIds, userEntry(idResult(1, responseB), idResult(0, missingA))]
+  const notStripped = patchGenerateContentBody({ contents: reversed }, record(nativeWithoutIds), route)
+  assert.equal(notStripped.replayedModelTurns, 0)
+  assert.strictEqual(notStripped.body.contents, reversed)
+
+  const ordered = [sentWithIds, userEntry(idResult(0, missingA), idResult(1, responseB))]
+  const stripped = patchGenerateContentBody({ contents: ordered }, record(nativeWithoutIds), route)
+  assert.equal(stripped.replayedModelTurns, 1)
+  assert.deepEqual(stripped.body.contents[1], userEntry(result(missingA), result(responseB)))
+
+  const separated = [modelTurn, userEntry(result({ output: '(see attached image)' })),
+    userEntry('Tool result image:', { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }),
+    userEntry(result({ output: 'Result B' }))]
+  const replay = patchGenerateContentBody({ contents: separated }, record(nativeWithoutIds), route)
+  assert.equal(replay.replayedModelTurns, 1)
+  assert.deepEqual(replay.body.contents, [{ ...modelTurn, parts: nativeWithoutIds }, ...separated.slice(1)])
 })
 
 test('patchGenerateContentBody aligns compaction requests with native history and rejects other auxiliary purposes', () => {

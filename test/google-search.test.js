@@ -215,11 +215,12 @@ test('geminiTransport performs read-only prefix alignment for same-route compact
     sessionId = 'sess-1',
     loop = false,
     purpose = 'compaction',
+    targetBaseURL = baseURL,
     messages = [...historyMessages, { role: 'user', content: [{ type: 'text', text: 'Condense the conversation ABOVE.' }] }],
     body = compactionBody,
     intact = false,
   } = {}) {
-    const input = `${baseURL}/models/${targetModel}:streamGenerateContent?alt=sse`
+    const input = `${targetBaseURL}/models/${targetModel}:streamGenerateContent?alt=sse`
     const headers = new Headers({ 'x-goog-api-key': 'synthetic', 'content-length': '1' })
     const signal = new AbortController().signal
     const request = Object.freeze({ provider, model: targetModel, sessionId, agent: loop, purpose, messages })
@@ -227,7 +228,7 @@ test('geminiTransport performs read-only prefix alignment for same-route compact
     let returnedResponse
     const stream = handlers.get('llm/stream')(request, async function* () {
       await Promise.resolve()
-      handlers.get('llm-pi-ai/request-headers')({ ...request, baseURL }, headers, () => headers)
+      handlers.get('llm-pi-ai/request-headers')({ ...request, baseURL: targetBaseURL }, headers, () => headers)
       returnedResponse = globalThis.fetch(input, init)
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'summary' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -236,7 +237,7 @@ test('geminiTransport performs read-only prefix alignment for same-route compact
     for await (const chunk of stream) chunks.push(chunk)
     const call = calls.at(-1)
     if (intact) assert.strictEqual(call.init, init)
-    return { init: call.init, body: JSON.parse(call.init.body), chunks, returnedResponse }
+    return { input: call.input, init: call.init, body: JSON.parse(call.init.body), chunks, returnedResponse }
   }
 
   const setSessionHeader = header => {
@@ -255,6 +256,12 @@ test('geminiTransport performs read-only prefix alignment for same-route compact
   assert.equal(aligned.body.generationConfig, undefined, 'compaction must never inject XHIGH')
   assert.equal(aligned.chunks.at(-1).replayState, undefined, 'compaction must not attach native replayState')
   assert.equal(reports.length, 0, 'compaction must not call reportFor')
+
+  const mirror = await invoke({ targetBaseURL: 'https://new-mirror.test/v1beta' })
+  assert.equal(new URL(mirror.input).hostname, 'new-mirror.test')
+  assert.deepEqual(mirror.body, aligned.body, 'the same provider/model can replay after changing mirrors')
+  assert.equal(mirror.chunks.at(-1).replayState, undefined)
+  assert.equal(reports.length, 0)
 
   // 2. googleSearch only (nativeHistory: false) with XHigh enabled: aligns tools/toolConfig only, read-only.
   routes = { mock: { localizePrompt: false, nativeHistory: false, googleSearch: true } }

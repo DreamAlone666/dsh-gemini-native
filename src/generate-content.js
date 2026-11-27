@@ -21,6 +21,8 @@ export function normalizeEndpoint(value) {
   return url.href.replace(/\/+$/u, '')
 }
 
+// Keep the v1/v2 route value for diagnosticsProjection.lastNativeRoute; it is
+// descriptive metadata, not a replay domain or attestation of the upstream.
 export function routeIdentity(route) {
   return createHash('sha256').update(JSON.stringify([
     generateContentApi, route.baseURL, route.provider ?? '', Boolean(route.googleSearch),
@@ -33,6 +35,15 @@ export function historyFingerprint(contents, systemParts = []) {
 
 function replayDigest(wire) {
   return createHash('sha256').update(wire).digest('base64url')
+}
+
+// FAQ #3: streaming may deliver thoughtSignature on a text: "" part.
+// https://aistudio.google.com/docs/thought-signatures.md?generate-content=true#faqs
+// pi-ai opens a text/thinking run even for an empty part if its kind changes
+// or there is no open run (e.g. just after a function call).
+// https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-generative-ai.ts
+function textPartType(part) {
+  if (typeof part.text === 'string') return part.thought === true ? 'reasoning' : 'text'
 }
 
 function compactReplayFrames(frames, blocks, callIds) {
@@ -59,8 +70,8 @@ function compactReplayFrames(frames, blocks, callIds) {
     const parts = candidate.content.parts.map((part, p) => {
       if (!isObject(part)) return part
       let value = part
-      if (typeof part.text === 'string' && part.text.length) {
-        const type = part.thought === true ? 'reasoning' : 'text'
+      const type = textPartType(part)
+      if (type !== undefined) {
         if (openText?.type !== type) {
           const b = textPositions[nextText++]
           openText = { type, b, block: b === undefined ? undefined : blocks[b], offset: 0 }
@@ -68,7 +79,8 @@ function compactReplayFrames(frames, blocks, callIds) {
         const start = openText.offset
         const end = start + part.text.length
         openText.offset = end
-        if (openText.block?.type === type && typeof openText.block.text === 'string'
+        // Empty parts advance the run above but cost less to leave literal.
+        if (end > start && openText.block?.type === type && typeof openText.block.text === 'string'
           && openText.block.text.startsWith(part.text, start)) {
           refs.push(start === 0 && end === openText.block.text.length
             ? [f, c, p, openText.b, textRef]
@@ -284,25 +296,40 @@ export function responseFrame(payload) {
   }]
 }
 
-function groupedTextBlocks(rawParts) {
+function groupedTextBlocks(rawParts, { merge = true, ignoreEmpty = false } = {}) {
   const blocks = []
   let open = null
   for (const part of rawParts) {
-    if (typeof part.text === 'string' && part.text.length) {
-      const type = part.thought === true ? 'reasoning' : 'text'
-      if (open?.type === type) open.text += part.text
+    const type = textPartType(part)
+    if (type !== undefined && (!ignoreEmpty || part.text.length > 0)) {
+      if (merge && open?.type === type) open.text += part.text
       else {
         open = { type, text: part.text }
         blocks.push(open)
       }
+      if (typeof part.thoughtSignature === 'string' && part.thoughtSignature) {
+        (open.signatures ??= new Set()).add(part.thoughtSignature)
+      }
     }
-    if (part.functionCall !== undefined) open = null
+    if (part.functionCall !== undefined) {
+      blocks.push({ type: 'tool-call' })
+      open = null
+    }
   }
   return blocks
 }
 
-function sameTextBlocks(left, right) {
-  return left.length === right.length && left.every((block, i) => block.type === right[i].type && block.text === right[i].text)
+function sameBlockOrder(left, right) {
+  return left.length === right.length && left.every((block, i) => block.type === right[i].type
+    && (block.type === 'tool-call' || block.text === right[i].text))
+}
+
+function hasServerTools(parts) {
+  return parts.some(part => nativeKeys.some(key => Object.hasOwn(part, key)))
+}
+
+function originalCallId(call) {
+  if (typeof call.id === 'string' && call.id !== '') return call.id
 }
 
 function nativeHistory(message, allowCirculation) {
@@ -319,21 +346,39 @@ function nativeHistory(message, allowCirculation) {
       rawParts.push(part)
     }
   }
-  if (!rawParts.length || (!allowCirculation && rawParts.some(part => nativeKeys.some(key => Object.hasOwn(part, key))))) return
-  const stored = message.content.filter(block => block.type === 'reasoning' || block.type === 'text')
-  const displayed = groupedTextBlocks(rawParts)
-  const legacyDisplayed = rawParts.flatMap(part => typeof part.text === 'string' && part.text.length
-    ? [{ type: part.thought === true ? 'reasoning' : 'text', text: part.text }] : [])
-  if (!sameTextBlocks(displayed, stored) && !sameTextBlocks(legacyDisplayed, stored)) return
-  const local = message.content.filter(block => block.type === 'tool-call')
+  if (!rawParts.length) return
+  const requiresCirculation = hasServerTools(rawParts)
+  if (requiresCirculation && !allowCirculation) return
+  // Preserve Part boundaries and signatures on the wire; grouping is solely a
+  // check against DSH's durable blocks. Gemini 3/4 require the first function
+  // signature of each active step, and recommend replaying text signatures.
+  // https://aistudio.google.com/docs/thought-signatures.md?generate-content=true#function-calling
+  // https://aistudio.google.com/docs/thinking.md?generate-content=true#signatures
+  const stored = message.content.filter(block => ['text', 'reasoning', 'tool-call'].includes(block.type))
+  let displayed = groupedTextBlocks(rawParts)
+  // Older transcripts omitted empty blocks and/or stored parts unmerged.
+  if (!sameBlockOrder(displayed, stored)) displayed = groupedTextBlocks(rawParts, { ignoreEmpty: true })
+  if (!sameBlockOrder(displayed, stored)) displayed = groupedTextBlocks(rawParts, { ignoreEmpty: true, merge: false })
+  if (!sameBlockOrder(displayed, stored)) return
+  const local = stored.filter(block => block.type === 'tool-call')
   const calls = rawParts.filter(part => part.functionCall !== undefined)
   if (local.length !== state.callIds.length || calls.length !== local.length) return
+  const ids = []
+  const seenIds = new Set()
   for (let i = 0; i < local.length; i++) {
     const original = calls[i].functionCall
     if (!isObject(original) || original.name !== local[i].name || local[i].id !== state.callIds[i]
       || JSON.stringify(original.args ?? {}) !== local[i].arguments) return
+    const id = originalCallId(original)
+    // pi-ai replaces duplicate IDs; do not undo this disambiguation.
+    // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-generative-ai.ts
+    if (id !== undefined) {
+      if (seenIds.has(id)) return
+      seenIds.add(id)
+    }
+    ids.push(id)
   }
-  return { parts: rawParts, calls, local }
+  return { parts: rawParts, calls, local, ids, displayed, requiresCirculation }
 }
 
 function withoutDshWebSearch(tools) {
@@ -412,33 +457,253 @@ export function applyGoogleSearchTools(body, enableSearch, requiresCirculation =
   return { body: changed ? next : body, changed }
 }
 
-function indexNativeAssistants({ provider, model, messages, purpose }, route) {
+// Match pi-ai's own provider + model policy within generateContent. DSH's
+// LlmRuntime.forAdapter excludes replay from other adapters, but multiple
+// configured providers can share one adapter. Do not match just the model ID:
+// gateways report incompatible signatures on cross-transport failover.
+// https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts
+// https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-shared.ts
+// https://github.com/vercel/ai/issues/14196
+// https://pydantic.dev/docs/ai/models/google/#switching-between-the-gemini-api-and-google-cloud
+// https://github.com/yetone/magpie/issues/3572
+// https://github.com/router-for-me/CLIProxyAPI/pull/7016 (Vertex bare-Tink)
+// https://github.com/router-for-me/CLIProxyAPI/issues/7484 (gateway translation)
+// https://github.com/heyhuynhgiabuu/proxypal/issues/146
+// Google documents some same-backend cross-model replay, not arbitrary relays:
+// https://aistudio.google.com/docs/choosing-a-model.md?generate-content=true#pair-models
+function indexNativeAssistants({ provider, model, messages, purpose }) {
+  if ((purpose !== undefined && purpose !== 'compaction') || !Array.isArray(messages)
+    || typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return
+  const assistants = []
   const byPrefix = new Map()
-  if ((purpose !== undefined && purpose !== 'compaction') || !Array.isArray(messages)) return byPrefix
-  for (const [index, message] of messages.entries()) {
-    if (message?.role !== 'assistant' || message.source?.provider !== provider || message.source?.model !== model) continue
+  let hasReplay = false
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.content) || !message.content.every(isObject)) continue
     const metadata = extractNativeData(message.source?.replayState)
-    if (!metadata || metadata.model !== model || metadata.route !== route.identity || metadata.outcome !== 'complete'
-      || typeof metadata.prefix !== 'string') continue
-    const candidate = { index, message }
-    const bucket = byPrefix.get(metadata.prefix)
-    if (bucket) bucket.push(candidate)
-    else byPrefix.set(metadata.prefix, [candidate])
+    const sameDomain = message.source?.provider === provider && message.source?.model === model
+    const replayable = sameDomain && metadata?.model === model && metadata.outcome === 'complete'
+    if (typeof metadata?.prefix === 'string') {
+      const bucket = byPrefix.get(metadata.prefix)
+      if (bucket) bucket.push(assistants.length)
+      else byPrefix.set(metadata.prefix, [assistants.length])
+    }
+    // Ineligible steps still occupy positions. Filtering them out here could
+    // attach a native record to a cross-provider or unrecorded lookalike.
+    assistants.push({ message, replayable, sameDomain })
+    hasReplay ||= replayable
   }
-  return byPrefix
+  if (!hasReplay) return
+  for (const assistant of assistants) Object.assign(assistant, sourceAssistantShape(assistant.message.content))
+  return { assistants, byPrefix }
 }
 
-function findNativeAssistant(candidates, startIndex, wireParts, allowCirculation) {
-  if (!candidates) return
-  const wireCalls = wireParts.filter(part => isObject(part?.functionCall))
-  for (const { index, message } of candidates) {
-    if (index < startIndex) continue
-    const native = nativeHistory(message, allowCirculation)
-    if (!native) continue
-    if (wireCalls.length !== native.local.length
-      || wireCalls.some((part, j) => part.functionCall.name !== native.local[j].name)) continue
-    return { index, native }
+// Shape comparison mirrors pi-ai's convertMessages for visible text/thinking
+// and ordered calls. Signed blanks may or may not survive normalization, and
+// legacy/foreign messages may lack thinking on the wire. These omissions are
+// allowed for alignment only; nativeHistory still checks the durable content.
+// https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-shared.ts
+// https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/transform-messages.ts
+function shapeText(text) {
+  if (typeof text !== 'string') return
+  // Match pi-ai's sanitizeSurrogates (remove, not replace, lone surrogates).
+  const normalized = text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, '')
+  if (normalized.trim()) return normalized
+}
+
+function shapeArguments(json) {
+  try {
+    const parsed = JSON.parse(json)
+    if (isObject(parsed)) return parsed
+  } catch { /* DSH's pi-ai replay parser also falls back to {}. */ }
+  return {}
+}
+
+function sourceAssistantShape(content) {
+  const tokens = []
+  const callIds = []
+  const textKinds = new Set()
+  for (const block of content) {
+    if (block.type === 'tool-call') {
+      tokens.push(['tool-call', block.name, shapeArguments(block.arguments)])
+      callIds.push(block.id)
+    } else if (block.type === 'text' || block.type === 'reasoning') {
+      textKinds.add(block.type)
+      const text = shapeText(block.text)
+      if (text !== undefined) tokens.push([block.type, text])
+    }
   }
+  const shape = JSON.stringify(tokens)
+  const withoutReasoning = tokens.some(([type]) => type === 'reasoning')
+    ? JSON.stringify(tokens.filter(([type]) => type !== 'reasoning')) : shape
+  return { shape, withoutReasoning, callIds, textKinds }
+}
+
+function wireAssistantShape(parts) {
+  if (!parts.length) return
+  const tokens = []
+  const wireCalls = []
+  const textKinds = new Set()
+  for (const part of parts) {
+    if (!isObject(part)) return
+    const type = textPartType(part)
+    const call = part.functionCall
+    if (type === undefined && call === undefined) return
+    if (type !== undefined) {
+      textKinds.add(type)
+      const text = shapeText(part.text)
+      if (text !== undefined) tokens.push([type, text])
+    }
+    if (call !== undefined) {
+      if (!isObject(call) || typeof call.name !== 'string' || (call.args != null && !isObject(call.args))
+        || (call.id !== undefined && typeof call.id !== 'string')) return
+      tokens.push(['tool-call', call.name, call.args ?? {}])
+      wireCalls.push(call)
+    }
+  }
+  return { shape: JSON.stringify(tokens), wireCalls, textKinds }
+}
+
+function matchesAssistant(assistant, wire) {
+  // An emitted signed blank still proves the source had that kind of block.
+  // pi-ai never emits a thinking block from a foreign provider/model.
+  const hasThinking = wire.textKinds.has('reasoning')
+  if (hasThinking && !assistant.sameDomain) return false
+  if (assistant.shape !== wire.shape && (hasThinking || assistant.withoutReasoning !== wire.shape)) return false
+  for (const kind of wire.textKinds) if (!assistant.textKinds.has(kind)) return false
+  return wire.wireCalls.every((call, i) => {
+    const id = assistant.callIds[i]
+    // Legacy models omit IDs; pi-ai may normalize IDs across routes.
+    return call.id === undefined || call.id === id
+      || (typeof id === 'string' && call.id === id.replace(/[^a-zA-Z0-9_-]/gu, '_').slice(0, 64))
+  })
+}
+
+function alignAssistants(contents, request) {
+  const index = indexNativeAssistants(request)
+  if (!index) return
+  const { assistants } = index
+  const byPosition = new Map()
+  let cursor = assistants.length - 1
+  for (let i = contents.length - 1; i >= 0; i--) {
+    const entry = contents[i]
+    if (entry?.role !== 'model') continue
+    if (!Array.isArray(entry.parts)) return
+    const wire = wireAssistantShape(entry.parts)
+    if (!wire) return
+    while (cursor >= 0 && !matchesAssistant(assistants[cursor], wire)) cursor--
+    // pi-ai emits zero or one model entry per assistant, in order. If the
+    // body is not a subsequence of the projected history, don't guess.
+    if (cursor < 0) return
+    byPosition.set(i, { wire, latest: cursor-- })
+  }
+  return { ...index, byPosition }
+}
+
+function matchByPrefix(alignment, prefix, wire, first, latest) {
+  let matched
+  for (const i of alignment.byPrefix.get(prefix) ?? []) {
+    if (i < first || i > latest || !matchesAssistant(alignment.assistants[i], wire)) continue
+    if (matched !== undefined) return
+    matched = i
+  }
+  return matched
+}
+
+function preservesWireSignatures(wireParts, native) {
+  // pi-ai may carry only one signature from a coalesced stream run. Match
+  // each outbound part to the corresponding durable run, not to any equal
+  // signature elsewhere in the message. A function call ends the text run.
+  // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-generative-ai.ts
+  if (!wireParts.some(part => part.thoughtSignature)) return true
+  const blocks = native.displayed
+  let cursor = 0
+  let call = 0
+  for (const part of wireParts) {
+    const signature = part.thoughtSignature
+    const type = textPartType(part)
+    const text = type === undefined ? undefined : shapeText(part.text)
+    if (type !== undefined && (text !== undefined || signature)) {
+      while (blocks[cursor] && blocks[cursor].type !== 'tool-call') {
+        const block = blocks[cursor]
+        if (block.type === type && shapeText(block.text) === text && (!signature || block.signatures?.has(signature))) break
+        cursor++
+      }
+      if (blocks[cursor]?.type !== type) return false
+      cursor++
+    }
+    if (part.functionCall !== undefined) {
+      while (blocks[cursor] && blocks[cursor].type !== 'tool-call') cursor++
+      if (blocks[cursor]?.type !== 'tool-call' || (signature && signature !== native.calls[call]?.thoughtSignature)) return false
+      cursor++
+      call++
+    }
+  }
+  return true
+}
+
+function alignFunctionResponses(entry, native, wireCalls) {
+  // No rebinding is needed if IDs are unchanged. This also covers Gemini 2.5
+  // results split across an image Content and multiple functionResponse entries.
+  // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-shared.ts
+  if (wireCalls.every((call, i) => call.id === native.ids[i])) return { entry }
+  if (entry?.role !== 'user' || !Array.isArray(entry.parts)) return
+  const byId = new Map()
+  const idlessByName = new Map()
+  for (const [i, call] of wireCalls.entries()) {
+    const id = call.id ?? native.local[i].id
+    if (byId.has(id)) return
+    byId.set(id, i)
+    if (call.id === undefined) {
+      const sameName = idlessByName.get(call.name)
+      if (sameName) sameName.push(i)
+      else idlessByName.set(call.name, [i])
+    }
+  }
+  const seen = new Set()
+  const lastIdlessByName = new Map()
+  let changed = false
+  const parts = []
+  for (const part of entry.parts) {
+    const response = part?.functionResponse
+    if (response === undefined) {
+      parts.push(part)
+      continue
+    }
+    if (!isObject(response)) return
+    let i
+    if (response.id === undefined) {
+      const available = idlessByName.get(response.name)?.filter(index => !seen.has(index))
+      if (!available?.length) return
+      // pi-ai can append synthetic results, so order alone cannot pair two
+      // same-name calls if reattaching a provider ID would change the binding.
+      // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/transform-messages.ts
+      if (available.length > 1 && available.some(index => native.ids[index] !== undefined)) return
+      i = available[0]
+    } else {
+      i = byId.get(response.id)
+      if (i === undefined || seen.has(i) || wireCalls[i].name !== response.name) return
+    }
+    seen.add(i)
+    // Google pairs calls with results by ID when one was supplied; don't
+    // guess a different pairing or leave half of this tool exchange patched.
+    // https://aistudio.google.com/docs/tool-combination.md?generate-content=true#critical-fields
+    const id = native.ids[i]
+    if (id === undefined) {
+      // Removing IDs makes same-name results positional again. Preserve the
+      // normalized exchange rather than reinterpreting an out-of-order pair.
+      // https://aistudio.google.com/docs/thought-signatures.md?generate-content=true#faqs
+      const previous = lastIdlessByName.get(response.name)
+      if (previous !== undefined && i < previous) return
+      lastIdlessByName.set(response.name, i)
+    }
+    if (id === response.id) parts.push(part)
+    else {
+      changed = true
+      const { id: _localId, ...rest } = response
+      parts.push({ ...part, functionResponse: id === undefined ? rest : { ...response, id } })
+    }
+  }
+  if (seen.size === wireCalls.length) return { entry: changed ? { ...entry, parts } : entry }
 }
 
 /**
@@ -455,83 +720,68 @@ export function patchGenerateContentBody(body, request, route) {
   const systemParts = Array.isArray(body.systemInstruction?.parts)
     ? body.systemInstruction.parts
     : typeof body.systemInstruction === 'string' ? [{ text: body.systemInstruction }] : []
-  const assistantsByPrefix = indexNativeAssistants(request, route)
-  // Keep the [systemParts, contents] JSON array open. Copy the hash state (not
-  // the contents) at model turns; hash each entry only after patching it.
-  const prefixHash = assistantsByPrefix.size > 0
+  const alignment = alignAssistants(body.contents, request)
+  // Keep the legacy [systemParts, contents] fingerprint for tie-breaking and
+  // stable compaction requests, not as a replay gate. DSH's signature prefix
+  // binding is Anthropic-only:
+  // https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-pi-ai/src/prefix-binding.ts
+  // Gemini 4 only supports implicit caching (4,096 token minimum; at least
+  // 2,050 new tokens for full previous-request reuse). Stable prefixes can
+  // help, but actual reuse is reported as usageMetadata.cachedContentTokenCount.
+  // https://aistudio.google.com/docs/caching.md?generate-content=true#implicit-caching
+  const prefixHash = alignment?.byPrefix.size > 0
     ? createHash('sha256').update(`[${JSON.stringify(systemParts)},[`) : null
+  // Circulate server-side parts only when allowed on this request. Ordinary
+  // turns don't require Search, and Google doesn't support circulation with AUTO.
+  // https://aistudio.google.com/docs/tool-combination.md?generate-content=true#limitations
   const allowCirculation = route.googleSearch === true
-    && !(isObject(body.toolConfig) && body.toolConfig.includeServerSideToolInvocations === false)
+    && (body.toolConfig === undefined || (isObject(body.toolConfig) && body.toolConfig.includeServerSideToolInvocations !== false))
+    && body.toolConfig?.functionCallingConfig?.mode !== 'AUTO'
 
   let assistantCursor = 0
-  const patchedContents = []
-  let pendingCalls = null
+  const patchedContents = [...body.contents]
   let requiresCirculation = false
-  let contentsChanged = false
   let totalModelTurns = 0
   let replayedModelTurns = 0
 
-  for (const entry of body.contents) {
-    const previousCalls = pendingCalls
-    pendingCalls = null
-    let nextEntry = entry
+  for (const [i, entry] of body.contents.entries()) {
     if (entry?.role === 'model' && Array.isArray(entry.parts)) {
       totalModelTurns++
-      const candidates = prefixHash && assistantsByPrefix.get(prefixHash.copy().update(']]').digest('hex'))
-      const match = findNativeAssistant(candidates, assistantCursor, entry.parts, allowCirculation)
-      if (match) {
-        replayedModelTurns++
-        assistantCursor = match.index + 1
-        const { parts, calls, local } = match.native
-        requiresCirculation ||= parts.some(part => nativeKeys.some(key => Object.hasOwn(part, key)))
-        if (local.length) {
-          const byLocalId = new Map()
-          const ordered = []
-          for (let j = 0; j < local.length; j++) {
-            const wireId = typeof calls[j].functionCall.id === 'string' && calls[j].functionCall.id
-              ? calls[j].functionCall.id : undefined
-            const info = { localId: local[j].id, name: calls[j].functionCall.name, wireId }
-            byLocalId.set(local[j].id, info)
-            ordered.push(info)
+      const slot = alignment?.byPosition.get(i)
+      if (slot) {
+        const { wire, latest } = slot
+        // Earliest/latest feasible matches bound all monotonic alignments. If
+        // they differ, use a unique exact prefix match or leave the slot alone.
+        // An unresolved slot still consumes at least its earliest possibility;
+        // don't choose a later lookalike and exclude legitimate subsequent hits.
+        while (assistantCursor < latest && !matchesAssistant(alignment.assistants[assistantCursor], wire)) assistantCursor++
+        const first = assistantCursor
+        const matched = first === latest ? first : prefixHash
+          ? matchByPrefix(alignment, prefixHash.copy().update(']]').digest('hex'), wire, first, latest) : undefined
+        assistantCursor = first + 1
+        const assistant = alignment.assistants[matched]
+        const native = assistant?.replayable ? nativeHistory(assistant.message, allowCirculation) : undefined
+        if (native && preservesWireSignatures(entry.parts, native)) {
+          const next = body.contents[i + 1]
+          const response = alignFunctionResponses(next, native, wire.wireCalls)
+          if (response) {
+            assistantCursor = matched + 1
+            replayedModelTurns++
+            requiresCirculation ||= native.requiresCirculation
+            patchedContents[i] = { ...entry, parts: native.parts }
+            if (response.entry !== next) patchedContents[i + 1] = response.entry
           }
-          pendingCalls = { byLocalId, ordered }
         }
-        nextEntry = { ...entry, parts }
-        contentsChanged = true
-      }
-    } else if (entry?.role === 'user' && Array.isArray(entry.parts) && previousCalls) {
-      let orderIndex = 0
-      let entryChanged = false
-      const parts = entry.parts.map(part => {
-        if (!isObject(part?.functionResponse)) return part
-        const response = part.functionResponse
-        const matched = (typeof response.id === 'string' ? previousCalls.byLocalId.get(response.id) : undefined)
-          ?? (previousCalls.ordered[orderIndex]?.name === response.name ? previousCalls.ordered[orderIndex] : undefined)
-        orderIndex++
-        if (!matched) return part
-        if (matched.wireId !== undefined) {
-          if (response.id === matched.wireId) return part
-          entryChanged = true
-          return { ...part, functionResponse: { ...response, id: matched.wireId } }
-        }
-        if (!Object.hasOwn(response, 'id')) return part
-        const { id: _dropped, ...rest } = response
-        entryChanged = true
-        return { ...part, functionResponse: rest }
-      })
-      if (entryChanged) {
-        nextEntry = { ...entry, parts }
-        contentsChanged = true
       }
     }
     if (prefixHash) {
-      if (patchedContents.length > 0) prefixHash.update(',')
-      prefixHash.update(JSON.stringify(nextEntry) ?? 'null')
+      if (i > 0) prefixHash.update(',')
+      prefixHash.update(JSON.stringify(patchedContents[i]) ?? 'null')
     }
-    patchedContents.push(nextEntry)
   }
 
   const nextPrefix = prefixHash?.update(']]').digest('hex') ?? historyFingerprint(patchedContents, systemParts)
+  const contentsChanged = replayedModelTurns > 0
   const contentBody = contentsChanged ? { ...body, contents: patchedContents } : body
   const tools = applyGoogleSearchTools(contentBody, route.googleSearch === true, requiresCirculation)
   return {

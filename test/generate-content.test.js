@@ -77,6 +77,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
     const requests = []
     const originalFetch = globalThis.fetch
     let mode = 'normal'
+    let initialFrames = streamFrames
     const transport = async (input, init) => {
       const url = new URL(input)
       const body = JSON.parse(init.body)
@@ -85,7 +86,7 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
       if (mode === 'max-tokens') return sse([frame([{ text: 'cut ' }]), frame([{ text: 'short' }], 'MAX_TOKENS')])
       // pi-ai selects candidates[0], even if a relay returns a different index
       // first. The alternate has identical text but different opaque fields.
-      const frames = body.contents.length === 1 ? streamFrames : answerFrames
+      const frames = body.contents.length === 1 ? initialFrames : answerFrames
       return sse(frames.map(({ candidates: [actual] }) => ({
         candidates: [{ ...actual, index: 1 }, {
           ...actual,
@@ -184,6 +185,69 @@ test('installed DSH reuses pi-ai for streaming, persists native parts & pi-ai re
     assert.equal(diag.searchQueries, 1)
     assert.equal(diag.searchSources, 1)
     assert.equal(diag.promptLocalizedInLog, false)
+
+    await t.test('replays signed-empty SSE parts exactly through compact v2 replay', async t => {
+      const signedEmptyParts = [
+        { text: '', thoughtSignature: validSig('empty-at-start') },
+        { text: 'First reasoning run, chunk A. '.repeat(24), thought: true, thoughtSignature: validSig('thought-a') },
+        { text: 'First reasoning run, chunk B. '.repeat(24), thought: true, thoughtSignature: validSig('thought-b') },
+        { text: '', thoughtSignature: validSig('empty-between-thoughts') },
+        { text: 'Second reasoning run, chunk C. '.repeat(24), thought: true, thoughtSignature: validSig('thought-c') },
+        { text: 'Second reasoning run, chunk D. '.repeat(24), thought: true, thoughtSignature: validSig('thought-d') },
+        { functionCall: { name: 'read_mock', args: { path: 'signed-empty.txt' } }, thoughtSignature: validSig('signed-empty-call') },
+        { text: '', thoughtSignature: validSig('empty-after-function-call') },
+      ]
+      initialFrames = signedEmptyParts.map((part, i) => frame([part], i === signedEmptyParts.length - 1 ? 'STOP' : undefined))
+      t.after(() => { initialFrames = streamFrames })
+      const requestStart = requests.length
+      const callsBefore = calls
+      const signedEmptyAgent = await ctx.agentLoop.create('native-pi-ai-signed-empty', { provider: 'native', model })
+      signedEmptyAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'test signed-empty parts' }], source: { kind: 'user' } }))
+      await signedEmptyAgent.whenIdle()
+      assert.equal(requests.length, requestStart + 2)
+      assert.equal(calls, callsBefore + 1)
+
+      const first = signedEmptyAgent.session.snapshotEvents().find(event => event.type === 'assistant/message')
+      const record = first?.data.message.source.replayState?.response?.dshGeminiNative
+      assert.equal(record?.version, 2)
+      assert.match(record.digest, /^[A-Za-z0-9_-]{43}$/, 'signed-empty transitions must not disable v2 compaction')
+      assert.ok(record.refs.some(ref => ref.length === 7), 'coalesced reasoning must exercise a v2 streamed text slice')
+      assert.deepEqual(nativeReplayOf(first)?.frames.flatMap(entry => entry[0].content.parts), signedEmptyParts)
+
+      const localCall = first.data.message.content.find(block => block.type === 'tool-call')
+      assert.ok(localCall?.id, 'pi-ai assigns a local ID to the ID-less function call')
+      const continuation = requests[requestStart + 1].body
+      assert.deepEqual(continuation.contents[1], { role: 'model', parts: signedEmptyParts })
+      const result = continuation.contents[2].parts[0].functionResponse
+      assert.equal(result.name, 'read_mock')
+      assert.equal(Object.hasOwn(result, 'id'), false, 'do not send the generated local ID in the restored wire exchange')
+    })
+
+    await t.test('replays the prior tool step when DSH replaces the system instruction', async t => {
+      const promptBefore = 'Native history fixture: initial instruction.'
+      const promptAfter = 'Native history fixture: revised instruction.'
+      let prompt = promptBefore
+      t.after(ctx.systemPrompt.section({ name: 'test:system-revision', order: 0, text: () => prompt }))
+      const requestStart = requests.length
+      const changedAgent = await ctx.agentLoop.create('native-pi-ai-system-revision', { provider: 'native', model })
+      changedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'start with the initial instruction' }], source: { kind: 'user' } }))
+      await changedAgent.whenIdle()
+      assert.equal(requests.length, requestStart + 2)
+      const before = requests[requestStart + 1].body
+      const instructionText = body => body.systemInstruction.parts.map(part => part.text).join('')
+      const beforeInstruction = instructionText(before)
+      assert.ok(beforeInstruction.includes(promptBefore))
+      assert.deepEqual(before.contents[1], { role: 'model', parts })
+
+      prompt = promptAfter
+      changedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'continue with the revised instruction' }], source: { kind: 'user' } }))
+      await changedAgent.whenIdle()
+      assert.equal(requests.length, requestStart + 3)
+      const after = requests[requestStart + 2].body
+      assert.equal(instructionText(after), beforeInstruction.replace(promptBefore, promptAfter))
+      assert.deepEqual(after.contents.slice(0, before.contents.length), before.contents,
+        'the new system instruction must not suppress the retained native parts or their matching function response')
+    })
 
     // Verify failed transport attempt still preserves incomplete search evidence for projection.
     mode = 'drop'
