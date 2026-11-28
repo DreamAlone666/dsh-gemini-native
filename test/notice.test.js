@@ -192,8 +192,13 @@ test('status SSE sends only structured stats, omits upstream host, and enforces 
     provider: geminiProvider,
     model,
     status: 'ok',
-    totalHistoryTurns: 2,
+    totalHistoryTurns: 3,
     replayedHistoryTurns: 2,
+    currentModelHistoryTurns: 1,
+    sameModelReplayedTurns: 1,
+    crossModelReplayedTurns: 1,
+    crossModelCandidateTurns: 2,
+    crossModelHttp400: false,
     searchConfigured: true,
     searchInjected: true,
     searchMode: 'mixed',
@@ -262,6 +267,52 @@ test('status SSE sends only structured stats, omits upstream host, and enforces 
     prompt: null,
     transport: null,
   })
+})
+
+test('status SSE validates replay partitions separately from source totals and HTTP 400 attribution', async t => {
+  const f = noticeFixture({ showStatusNotice: true, routes: {} })
+  t.after(() => f.dispose())
+  const outbound = {
+    provider: geminiProvider, model, totalHistoryTurns: 4, replayedHistoryTurns: 3,
+    currentModelHistoryTurns: 1, sameModelReplayedTurns: 1, crossModelReplayedTurns: 2,
+    crossModelCandidateTurns: 3, crossModelHttp400: true,
+  }
+  async function snapshot(overrides = {}) {
+    f.notice.recordTransport('session-a', { ...outbound, ...overrides })
+    const reader = f.route().fetch(new Request(URL)).body.getReader()
+    try { return (await readSseJson(reader)).transport } finally { await reader.cancel() }
+  }
+  const classified = await snapshot()
+  for (const [key, value] of Object.entries(outbound)) assert.equal(classified[key], value)
+
+  const unclassified = await snapshot({ currentModelHistoryTurns: 3 })
+  assert.equal(unclassified.currentModelHistoryTurns, null)
+  assert.equal(unclassified.crossModelCandidateTurns, null)
+  assert.equal(unclassified.totalHistoryTurns, 4)
+  assert.equal(unclassified.replayedHistoryTurns, 3)
+  assert.equal(unclassified.sameModelReplayedTurns, 1)
+  assert.equal(unclassified.crossModelReplayedTurns, 2)
+  assert.equal(unclassified.crossModelHttp400, true)
+
+  const invalid = await snapshot({ crossModelReplayedTurns: 3 })
+  for (const key of [
+    'replayedHistoryTurns', 'sameModelReplayedTurns', 'crossModelReplayedTurns',
+    'currentModelHistoryTurns', 'crossModelCandidateTurns',
+  ]) assert.equal(invalid[key], null)
+  assert.equal(invalid.totalHistoryTurns, 4)
+  assert.equal(invalid.crossModelHttp400, false)
+
+  const noCross = await snapshot({ replayedHistoryTurns: 1, crossModelReplayedTurns: 0 })
+  assert.equal(noCross.crossModelHttp400, false)
+  assert.equal(noCross.crossModelCandidateTurns, 3, 'candidates alone do not justify an alert')
+
+  await snapshot()
+  f.setShow(false)
+  f.notice.recordTransport('session-a', null)
+  f.setShow(true)
+  const reader = f.route().fetch(new Request(URL)).body.getReader()
+  try { assert.equal((await readSseJson(reader)).transport, null, 'reopening the dock must not revive an invalidated alert') }
+  finally { await reader.cancel() }
 })
 
 test('installed DSH: status SSE computes prompt stats (matched, total, missedBuiltins capped at 6) without leaking prompt text', { skip: !installed, timeout: 5000 }, async t => {

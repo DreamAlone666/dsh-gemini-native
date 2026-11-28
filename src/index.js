@@ -16,6 +16,8 @@ export const RouteConfig = Schema.object({
     .description('Translate built-in DSH system prompts into Simplified Chinese.'),
   nativeHistory: Schema.boolean().default(true)
     .description('Save and replay Gemini native conversation parts.'),
+  gemini4FamilyReplay: Schema.boolean().default(false)
+    .description('Experimental: replay native history across Gemini 4 models on this provider when native history is enabled.'),
   googleSearch: Schema.boolean().default(false)
     .description('Use native Google Search instead of DSH web_search.'),
 })
@@ -34,6 +36,7 @@ export function routeConfigOf(routes, provider) {
   return {
     localizePrompt: entry?.localizePrompt === true,
     nativeHistory: entry?.nativeHistory !== false,
+    gemini4FamilyReplay: entry?.gemini4FamilyReplay === true,
     googleSearch: entry?.googleSearch === true,
   }
 }

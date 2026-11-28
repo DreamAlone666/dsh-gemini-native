@@ -254,6 +254,7 @@ async function loadClient({
   withDom = true,
   withReactDom = true,
   supportsAnchor = true,
+  viewportWidth = 1200,
 } = {}) {
   const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
   const React = createReactStub({ trackSubscriptions })
@@ -298,7 +299,7 @@ async function loadClient({
   const sandbox = {
     window: {
       location: { origin: 'http://localhost' },
-      innerWidth: 1200,
+      innerWidth: viewportWidth,
       innerHeight: 800,
       addEventListener(type, fn) {
         if (!windowListeners.has(type)) windowListeners.set(type, new Set())
@@ -344,14 +345,17 @@ async function loadClient({
   let locales = {}
   let currentModelsStatus = modelsStatus
   let currentDirectory = directoryCurrent
-  const makeForm = (ns, getValue, getStatus = () => 'ready') => ({
+  let configSnapshot = { status: 'ready', writable: true, revision: 7, value: configValue }
+  let configMutation
+  const makeForm = (ns, getSnapshot) => ({
     subscribe: () => () => {},
-    getSnapshot: () => ({ status: getStatus(), writable: true, revision: 7, value: getValue() }),
+    getSnapshot,
     async mutate(ops, revision) {
       mutations.push({ ns, ops, revision })
-      return true
+      return ns === 'dsh-gemini-native' && configMutation ? configMutation(ops, revision) : true
     },
   })
+  const configForm = makeForm('dsh-gemini-native', () => configSnapshot)
   const ctx = {
     effect(fn) {
       const cleanup = fn()
@@ -360,8 +364,8 @@ async function loadClient({
     locale: { register(ns, dicts) { locales = { ns, dicts }; return () => {} } },
     configForms: {
       get(ns) {
-        if (ns === 'dsh-gemini-native') return makeForm(ns, () => configValue)
-        if (ns === 'llm-pi-ai') return makeForm(ns, () => modelsValue, () => currentModelsStatus)
+        if (ns === 'dsh-gemini-native') return configForm
+        if (ns === 'llm-pi-ai') return makeForm(ns, () => ({ status: currentModelsStatus, writable: true, revision: 7, value: modelsValue }))
         throw new Error(`unexpected form ${ns}`)
       },
     },
@@ -403,7 +407,9 @@ async function loadClient({
     fetchCalls,
     t,
     tEn,
-    setConfig(v) { configValue = v },
+    configForm,
+    setConfig(v, state = {}) { configSnapshot = { ...configSnapshot, ...state, value: v } },
+    setConfigMutation(fn) { configMutation = fn },
     setModels(v) { modelsValue = v },
     setModelsStatus(s) { currentModelsStatus = s },
     setDirectoryCurrent(v) { currentDirectory = v },
@@ -464,26 +470,33 @@ test('provider card defaults to native history, discloses log retention, and kee
   // Built-in google without explicit override entry still renders once configured.
   const googleTree = renderTree(card.render({ provider: { provider: 'google' }, configured: true, t: env.t }))
   const googleCheckboxes = findAll(googleTree, node => node.type === 'input' && node.props.type === 'checkbox')
-  assert.equal(googleCheckboxes.length, 3)
+  assert.equal(googleCheckboxes.length, 4)
 
   const plain = value => JSON.parse(JSON.stringify(value))
 
-  // Native history (second checkbox) is on without a saved route. Both opt-ins are off.
+  // Native history is on without a saved route; the other features are opt-in.
   const geminiTree = renderTree(card.render({ provider: { provider: 'my-gemini' }, configured: true, t: env.t }))
   const checkboxes = findAll(geminiTree, node => node.type === 'input' && node.props.type === 'checkbox')
-  assert.deepEqual(checkboxes.map(node => node.props.checked), [false, true, false])
+  assert.deepEqual(checkboxes.map(node => node.props.checked), [false, true, false, false])
+  assert.equal(findAll(geminiTree.children[1], node => node.type === 'input').length, 3, 'keep the three primary checkboxes together')
+  assert.equal(findAll(geminiTree.children[2], node => node.type === 'input')[0], checkboxes[3], 'family replay is a separate row')
+  assert.match(collectText(geminiTree.children[2]).join(' '), /Gemini 4 家族跨模型互通.*实验性/u)
+  const [familyHelp] = findAll(geminiTree, node => node.props?.id === checkboxes[3].props['aria-describedby'])
+  assert.match(collectText(familyHelp).join(' '), /需开启原生历史回放.*Carbon、Argon、Neon、Hydrogen.*不一定连接同一上游.*HTTP 400.*不保证命中隐式缓存/u)
+  const english = renderTree(card.render({ provider: { provider: 'my-gemini' }, configured: true, t: env.tEn }))
+  assert.match(collectText(english.children[2]).join(' '), /Gemini 4 cross-model replay.*Experimental.*Requires Native history replay.*HTTP 400.*Implicit cache hits are not guaranteed/u)
   assert.match(collectText(geminiTree).join(' '), /默认开启.*会话日志.*不会清除/u)
   checkboxes[2].props.onChange({ target: { checked: true } })
   assert.deepEqual(plain(env.mutations.at(-1)), {
     ns: 'dsh-gemini-native',
     revision: 7,
-    ops: [{ op: 'set', path: ['routes', 'my-gemini'], value: { localizePrompt: false, nativeHistory: true, googleSearch: true } }],
+    ops: [{ op: 'set', path: ['routes', 'my-gemini'], value: { localizePrompt: false, nativeHistory: true, googleSearch: true, gemini4FamilyReplay: false } }],
   })
 
   // Turning off the default writes an explicit false. Opting into Search must not undo it.
   const defaultTree = renderTree(card.render({ provider: { provider: 'my-gemini' }, configured: true, t: env.t }))
   findAll(defaultTree, node => node.type === 'input')[1].props.onChange({ target: { checked: false } })
-  const disabledReplay = { localizePrompt: false, nativeHistory: false, googleSearch: false }
+  const disabledReplay = { localizePrompt: false, nativeHistory: false, googleSearch: false, gemini4FamilyReplay: false }
   assert.deepEqual(plain(env.mutations.at(-1)).ops, [{ op: 'set', path: ['routes', 'my-gemini'], value: disabledReplay }])
   env.setConfig({ routes: { 'my-gemini': disabledReplay } })
   const optedOutTree = renderTree(card.render({ provider: { provider: 'my-gemini' }, configured: true, t: env.t }))
@@ -512,6 +525,88 @@ test('provider card defaults to native history, discloses log retention, and kee
     revision: 7,
     ops: [{ op: 'unset', path: ['routes', 'my-openai'] }],
   })
+})
+
+test('family replay uses the same provider CAS read as the primary options and remembers opt-in when its parent is off', async () => {
+  const env = await loadClient()
+  const card = env.slots.get('settings.models.provider-card:llm-pi-ai')
+  const instance = createInstance()
+  const renderCard = () => {
+    env.React.__beginRender(instance)
+    try { return renderTree(card.render({ provider: { provider: 'google' }, configured: true, t: env.t })) }
+    finally { env.React.__endRender(); env.React.__flushEffects(instance) }
+  }
+  const checkbox = (tree, index) => findAll(tree, node => node.type === 'input' && node.props.type === 'checkbox')[index]
+  const toggle = (node, checked) => node.props.onChange({ target: { checked } })
+  const write = () => JSON.parse(JSON.stringify(env.mutations.at(-1)))
+  const path = ['routes', 'google']
+  const familyOnly = { localizePrompt: false, nativeHistory: true, googleSearch: false, gemini4FamilyReplay: true }
+
+  assert.equal(await toggle(checkbox(renderCard(), 3), true), true)
+  assert.deepEqual(write(), { ns: 'dsh-gemini-native', revision: 7, ops: [{ op: 'set', path, value: familyOnly }] })
+
+  env.setConfig({ routes: { google: familyOnly } }, { revision: 8 })
+  assert.equal(await toggle(checkbox(renderCard(), 1), false), true)
+  assert.deepEqual(write().ops, [{ op: 'set', path, value: { ...familyOnly, nativeHistory: false } }])
+  env.setConfig({ routes: { google: { ...familyOnly, nativeHistory: false } } }, { revision: 9 })
+  const paused = renderCard()
+  assert.equal(checkbox(paused, 3).props.checked, true)
+  assert.equal(checkbox(paused, 3).props.disabled, true)
+  assert.equal(await toggle(checkbox(paused, 1), true), true)
+  assert.deepEqual(write().ops, [{ op: 'set', path, value: familyOnly }])
+
+  env.setConfig({ routes: { google: familyOnly } }, { revision: 10 })
+  assert.equal(await toggle(checkbox(renderCard(), 3), false), true)
+  assert.deepEqual(write().ops, [{ op: 'unset', path }])
+
+  // A newer snapshot arrived before this rendered handler was activated.
+  env.setConfig({ routes: {} }, { revision: 11 })
+  const oldControl = checkbox(renderCard(), 3)
+  env.setConfig({ routes: { google: { localizePrompt: true, googleSearch: true } } }, { revision: 12 })
+  env.setConfigMutation(() => false)
+  assert.equal(await toggle(oldControl, true), false)
+  assert.deepEqual(write(), { ns: 'dsh-gemini-native', revision: 12, ops: [{
+    op: 'set', path, value: { ...familyOnly, localizePrompt: true, googleSearch: true },
+  }] })
+  const conflicted = renderCard()
+  assert.equal(checkbox(conflicted, 3).props.checked, false)
+  assert.match(collectText(findAll(conflicted, node => node.props?.role === 'alert')).join(' '), /设置已在别处更改/u)
+
+  // A lower composition layer can opt in; unsetting must not re-enable it.
+  env.setConfig({ routes: { google: familyOnly } }, { revision: 13, base: { routes: { google: familyOnly } } })
+  env.setConfigMutation(() => true)
+  assert.equal(await toggle(checkbox(renderCard(), 3), false), true)
+  assert.deepEqual(write().ops, [{ op: 'set', path, value: { ...familyOnly, gemini4FamilyReplay: false } }])
+  env.React.__unmount(instance)
+  env.disposeEffects()
+})
+
+test('plugin details summarize family replay only for active Gemini provider overrides with native history enabled', async () => {
+  const gemini = { api: 'google-generative-ai', baseURL: 'https://relay.test/v1beta', models: [{ id: 'gemini-4-hydrogen' }] }
+  const env = await loadClient({
+    modelsValue: { providers: { live: gemini, paused: gemini, stale: { api: 'openai-completions' }, disabled: gemini } },
+    configValue: { routes: {
+      live: { gemini4FamilyReplay: true },
+      paused: { gemini4FamilyReplay: true, nativeHistory: false },
+      stale: { gemini4FamilyReplay: true },
+      disabled: { gemini4FamilyReplay: false },
+    } },
+  })
+  const details = env.slots.get('plugins.row.config:dsh-gemini-native#dsh-gemini-native')
+  const renderDetails = (t = env.t) => renderTree(details.render({
+    view: 'page', form: { state: env.configForm.getSnapshot(), mutate: env.configForm.mutate }, t,
+  }))
+  const entries = tree => findAll(tree, node => node.type === 'li')
+    .map(node => [node.props.key, collectText(node).join(' ')])
+  const summary = 'Gemini 4 互通 · 实验性'
+  const list = entries(renderDetails())
+  assert.deepEqual(list.filter(([, text]) => text.includes(summary)).map(([id]) => id), ['live'])
+  assert.match(list.find(([id]) => id === 'stale')[1], /当前非 Gemini API 供应商/u)
+  assert.match(list.find(([id]) => id === 'paused')[1], /原生回放已关闭/u)
+  assert.match(entries(renderDetails(env.tEn)).find(([id]) => id === 'live')[1], /Gemini 4 cross-model replay · Experimental/u)
+  env.setModelsStatus('loading')
+  assert.ok(entries(renderDetails()).every(([, text]) => !text.includes(summary)))
+  env.disposeEffects()
 })
 
 test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostics card with status SSE and projection, and surfaces warnings scoped by provider', async () => {
@@ -549,7 +644,7 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   let activeModel = 'gemini-4-neon'
   let diagProjection = {
     assistantSteps: 5,
-    consecutiveNative: 4,
+    consecutiveNative: 2,
     nativeSteps: 4,
     nativeBytes: 12288,
     hasNativePayload: true,
@@ -599,16 +694,17 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   const [statusStream] = env.eventSources
   assert.equal(statusStream.url, 'http://localhost/api/dsh-gemini-native/status?sessionId=sess-diag')
 
-  // Emit structured telemetry with warning-free state first.
-  statusStream.emit({
+  // Emit structured telemetry for a Neon branch with inherited Hydrogen history.
+  const mixedStatus = {
     localizedProvider: 'my-gemini',
     prompt: { provider: 'my-gemini', matched: 8, total: 9, missedBuiltins: ['tools:custom'] },
     transport: {
       provider: 'my-gemini',
       model: 'gemini-4-neon',
       status: 'ok',
-      totalHistoryTurns: 4,
-      replayedHistoryTurns: 3,
+      totalHistoryTurns: 26,
+      replayedHistoryTurns: 6,
+      currentModelHistoryTurns: 6,
       searchConfigured: true,
       searchInjected: true,
       searchMode: 'mixed',
@@ -620,7 +716,8 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
       recordedFrames: 5,
       recordStatus: 'saved',
     },
-  })
+  }
+  statusStream.emit(mixedStatus)
 
   tree = renderNotice()
   let pill = findAll(tree, n => n.type === 'button')[0]
@@ -646,7 +743,9 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   assert.doesNotMatch(dialogText, /路由 ID|my-gemini\/gemini-4-neon/u)
   assert.ok(dialogText.includes('已替换 8 / 9 段'))
   assert.ok(dialogText.includes('tools:custom'))
-  assert.ok(dialogText.includes('回放命中 3 / 4 步 (部分回退) · 累计 12KB'))
+  assert.match(dialogText, /同模型回放 6 \/ 6 步 · 累计 12KB/u)
+  assert.match(dialogText, /其他模型或供应商的 20 步按兼容格式发送/u)
+  assert.doesNotMatch(dialogText, /未命中|部分回退/u)
   assert.ok(dialogText.includes('已自动排除上传'))
   assert.ok(dialogText.includes('混用 2 个本地工具 · 本会话 2 次'))
   assert.doesNotMatch(dialogText, /Thinking|XHIGH/u)
@@ -655,8 +754,64 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   diagProjection = undefined
   const dialogTextOf = tree => collectText(findAll(tree, n => n.props?.role === 'dialog')[0]).join(' ')
   assert.match(dialogTextOf(renderNotice()), /最近一次录制 2\.0KB/u)
-  assert.match(dialogTextOf(renderNotice(env.tEn)), /Replay matched 3 \/ 4 steps \(partial fallback\) · last recording 2\.0KB/u)
+  const mixedEnglish = dialogTextOf(renderNotice(env.tEn))
+  assert.match(mixedEnglish, /Same-model replay: 6 \/ 6 steps · last recording 2\.0KB/u)
+  assert.match(mixedEnglish, /Steps from other models or providers sent in standard format: 20/u)
+  assert.doesNotMatch(mixedEnglish, /Unmatched same-model steps|partial fallback/u)
   diagProjection = savedDiag
+
+  const emitHistory = (total, replayed, current, split) => statusStream.emit({ ...mixedStatus, transport: {
+    ...mixedStatus.transport, totalHistoryTurns: total, replayedHistoryTurns: replayed, currentModelHistoryTurns: current, ...split,
+  } })
+  const familySplit = { sameModelReplayedTurns: 2, crossModelReplayedTurns: 3 }
+  emitHistory(5, 5, 2, familySplit)
+  const allReplayed = dialogTextOf(renderNotice())
+  assert.match(allReplayed, /原生回放 5 \/ 5 步 · 累计 12KB.*同模型命中 2 步 · 跨模型命中 3 步/u)
+  assert.doesNotMatch(allReplayed, /兼容格式|同模型回放/u)
+
+  emitHistory(9, 5, 3, familySplit)
+  const classified = dialogTextOf(renderNotice())
+  assert.match(classified, /原生回放 5 \/ 9 步 · 累计 12KB.*同模型命中 2 步 · 跨模型命中 3 步/u)
+  assert.match(classified, /其他模型或供应商的 3 步按兼容格式发送.*同模型有 1 步未命中/u)
+  assert.match(dialogTextOf(renderNotice(env.tEn)), /Native replay: 5 \/ 9 steps.*Same-model hits: 2 · Cross-model hits: 3/u)
+  assert.doesNotMatch(classified, /原因未分类/u)
+
+  for (const unclassifiedCurrent of [null, 1, 7]) {
+    emitHistory(9, 5, unclassifiedCurrent, familySplit)
+    const unknown = dialogTextOf(renderNotice())
+    assert.match(unknown, /同模型命中 2 步 · 跨模型命中 3 步.*4 步按兼容格式发送（原因未分类）/u)
+    assert.doesNotMatch(unknown, /未命中|其他模型或供应商/u)
+  }
+  for (const invalidSplit of [{ ...familySplit, crossModelReplayedTurns: 2 }, { sameModelReplayedTurns: 5 }]) {
+    emitHistory(9, 5, 6, invalidSplit)
+    const invalid = dialogTextOf(renderNotice())
+    assert.match(invalid, /原生回放 5 \/ 9 步.*4 步按兼容格式发送（原因未分类）/u)
+    assert.doesNotMatch(invalid, /同模型回放|跨模型命中/u)
+  }
+
+  // No cross-model hits keeps the same-model presentation (old and new Host).
+  emitHistory(26, 6, 6, { sameModelReplayedTurns: 6, crossModelReplayedTurns: 0 })
+  assert.match(dialogTextOf(renderNotice()), /同模型回放 6 \/ 6 步.*其他模型或供应商的 20 步/u)
+  emitHistory(26, 5, 6)
+  assert.match(dialogTextOf(renderNotice()), /同模型回放 5 \/ 6 步.*其他模型或供应商的 20 步.*同模型有 1 步未命中，按兼容格式发送/u)
+  assert.match(dialogTextOf(renderNotice(env.tEn)), /Unmatched same-model steps sent in standard format: 1/u)
+
+  emitHistory(20, 0, 0)
+  const otherOnly = dialogTextOf(renderNotice())
+  assert.match(otherOnly, /暂无当前供应商和模型的历史.*其他模型或供应商的 20 步/u)
+  assert.doesNotMatch(otherOnly, /0 \/ 0|未命中/u)
+
+  emitHistory(6, 6, 6)
+  assert.doesNotMatch(dialogTextOf(renderNotice()), /兼容格式/u)
+
+  emitHistory(4, 3, undefined)
+  assert.match(dialogTextOf(renderNotice()), /原生回放 3 \/ 4 步.*1 步按兼容格式发送（原因未分类）/u)
+  assert.match(dialogTextOf(renderNotice(env.tEn)), /Steps sent in standard format \(reason not classified\): 1/u)
+  emitHistory(4, 3, 2)
+  assert.match(dialogTextOf(renderNotice()), /原因未分类/u)
+
+  emitHistory(0, 0, 0)
+  assert.match(dialogTextOf(renderNotice()), /暂无历史可回放/u)
 
   // Emit warning status (url-mismatch) -> shows 5px warning dot on pill + warning banner in dialog.
   statusStream.emit({
@@ -709,8 +864,8 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   const [fallbackRoute] = findAll(tree, n => n.props?.className === 'dsh-gn-diag-route')
   assert.equal(collectText(fallbackRoute).join(''), 'google / gemini-4-argon')
   assert.equal(fallbackRoute.props.title, 'google/gemini-4-argon')
-  assert.match(dialogTextOf(tree), /连续 4 \/ 5 步 · 12KB/u)
-  assert.doesNotMatch(dialogTextOf(tree), /路由 ID/u)
+  assert.match(dialogTextOf(tree), /日志已记录 4 \/ 5 步 · 12KB.*暂无当前模型的回放统计/u)
+  assert.doesNotMatch(dialogTextOf(tree), /同模型回放|路由 ID/u)
 
   // A new snapshot updates the structured prompt status.
   activeProvider = 'my-gemini'
@@ -732,20 +887,190 @@ test('NativeStatusNotice pill uses StatsPills classes, opens portaled diagnostic
   assert.equal(statusStream.closed, true)
 })
 
-test('NativeStatusNotice dialog closes on Escape, outside pointerdown, and capture click, and gracefully skips portal without ReactDOM', async () => {
+test('NativeStatusNotice offers family replay for validated exact-model candidates and handles cross-model HTTP 400 in place', async () => {
+  const provider = 'relay'
+  const env = await loadClient({
+    trackSubscriptions: true,
+    modelsValue: { providers: { [provider]: { api: 'google-generative-ai', baseURL: 'https://relay.test/v1beta', models: [{ id: 'gemini-4-neon' }] } } },
+    configValue: { routes: {}, showStatusNotice: true },
+  })
+  const notice = env.slots.get('conversation.composer.dock:dsh-gemini-native-notice')
+  const instance = createInstance()
+  const panelEl = { focus({ preventScroll }) {
+    assert.equal(preventScroll, true)
+    env.mockDocument.activeElement = panelEl
+  } }
+  let model = 'gemini-4-neon'
+  const renderNotice = (t = env.t, view = instance, sessionId = 'family-session') => {
+    env.React.__beginRender(view)
+    try {
+      const tree = renderTree(notice.render({
+        ...notice.meta.inject(sessionId), sessionId, t,
+        useProjection: (key, select) => key === 'modelSelection' ? select({ next: { provider, model } }) : undefined,
+      }))
+      const [dialog] = findAll(tree, node => node.props?.role === 'dialog')
+      if (dialog) dialog.props.ref.current = panelEl
+      return tree
+    } finally { env.React.__endRender(); env.React.__flushEffects(view) }
+  }
+  const action = (tree, key, t = env.t) => findAll(tree, node => node.type === 'button' && collectText(node).join('') === t(key))[0]
+  const text = tree => collectText(tree).join(' ')
+  const dot = tree => findAll(tree, node => node.props?.className === 'dsh-gn-dock-warn-dot').length
+  const configure = (entry, state) => env.setConfig({ routes: { [provider]: entry }, showStatusNotice: true }, state)
+  const write = () => JSON.parse(JSON.stringify(env.mutations.at(-1)))
+
+  const pill = findAll(renderNotice(), node => node.props?.className === 'dsh-gn-dock-pill')[0]
+  assert.equal(collectText(pill).join(''), '原生历史')
+  pill.props.onClick()
+  assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined, 'no telemetry yet')
+  const [stream] = env.eventSources
+  assert.equal(new URL(stream.url).searchParams.get('sessionId'), 'family-session')
+  const emit = fields => stream.emit({ transport: { provider, model, status: 'ok', totalHistoryTurns: 8, replayedHistoryTurns: 0, ...fields } })
+  const candidates = { crossModelCandidateTurns: 3 }
+
+  for (const candidate of [undefined, null, 0, -1, 1.5, '3']) {
+    emit({ crossModelCandidateTurns: candidate })
+    assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined)
+  }
+  for (const eligible of ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen', 'MODELS/GEMINI-4-NEON']) {
+    model = eligible
+    emit(candidates)
+    assert.ok(action(renderNotice(), 'diagFamilyEnable'), eligible)
+  }
+  for (const ineligible of ['gemini-4', 'gemini-3-flash', 'gemini-4-neon-preview', 'gemini-4-carbon-image', 'gemini-4-argon.v1', 'gemini-4-hydrogen@latest']) {
+    model = ineligible
+    emit(candidates)
+    assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined, ineligible)
+  }
+  model = 'gemini-4-neon'
+  for (const scope of [{ provider: 'google' }, { model: 'gemini-4-hydrogen' }]) {
+    emit({ ...candidates, ...scope })
+    assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined)
+  }
+  emit(candidates)
+  configure({ nativeHistory: false, googleSearch: true })
+  assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined, 'parent off')
+  configure({ nativeHistory: false, gemini4FamilyReplay: true })
+  assert.equal(renderNotice(), null, 'the saved child alone does not activate the capsule')
+  configure({}, { writable: false })
+  assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined, 'read-only config')
+  configure({}, { writable: true })
+  const discover = renderNotice()
+  const discoverAction = action(discover, 'diagFamilyEnable')
+  assert.match(text(discover), /有 3 步来自其他 Gemini 4 模型.*所有会话生效，从下一次请求开始/u)
+  const [riskId] = discoverAction.props['aria-describedby'].split(' ')
+  assert.match(text(findAll(discover, node => node.props?.id === riskId)), /同一兼容上游.*混用上游可能报 HTTP 400/u)
+  const englishDiscovery = renderNotice(env.tEn)
+  assert.ok(action(englishDiscovery, 'diagFamilyEnable', env.tEn))
+  assert.match(text(englishDiscovery), /same compatible upstream.*Mixed routing may return HTTP 400/u)
+  assert.equal(await discoverAction.props.onClick(), true)
+  const enabled = { localizePrompt: false, nativeHistory: true, googleSearch: false, gemini4FamilyReplay: true }
+  const path = ['routes', provider]
+  assert.deepEqual(write().ops, [{ op: 'set', path, value: enabled }])
+  configure(enabled, { revision: 8 })
+  assert.equal(action(renderNotice(), 'diagFamilyEnable'), undefined, 'already enabled')
+  assert.equal(dot(renderNotice()), 0)
+
+  const failed = { ...candidates, replayedHistoryTurns: 3, sameModelReplayedTurns: 0, crossModelReplayedTurns: 3 }
+  for (const failure of [401, 403, 400]) {
+    emit({ ...failed, upstreamStatus: failure, crossModelHttp400: false })
+    assert.equal(dot(renderNotice()), 0, 'the generic upstream status is not evidence of a cross-model 400')
+    assert.equal(action(renderNotice(), 'diagFamilyDisable'), undefined)
+  }
+  emit({ ...failed, crossModelHttp400: true, model: 'gemini-4-hydrogen' })
+  assert.equal(dot(renderNotice()), 0, 'a prior model cannot light this model’s warning')
+  emit({ ...failed, crossModelHttp400: true, error: 'do not show raw upstream error or signatures' })
+  const warning = renderNotice()
+  assert.equal(dot(warning), 1)
+  const otherSession = createInstance()
+  assert.equal(dot(renderNotice(env.t, otherSession, 'different-session')), 0)
+  env.React.__unmount(otherSession)
+  assert.ok(findAll(warning, node => node.props?.role === 'alert').some(node => text(node)
+    === '本次请求携带了跨模型原生历史，上游返回 HTTP 400；签名可能不兼容，可关闭后重试。'))
+  const englishWarning = renderNotice(env.tEn)
+  assert.ok(findAll(englishWarning, node => node.props?.role === 'alert').some(node => text(node)
+    === 'This request included cross-model native history and the upstream returned HTTP 400; thought signatures may be incompatible. Turn off cross-model replay and retry.'))
+  assert.doesNotMatch(text(warning), /do not show raw/u)
+  assert.ok(action(findAll(warning, node => node.props?.className === 'dsh-gn-diag-warn')[0], 'diagFamilyDisable'))
+  assert.equal(action(warning, 'diagFamilyEnable'), undefined)
+  configure(enabled, { writable: false })
+  assert.equal(action(renderNotice(), 'diagFamilyDisable'), undefined)
+  assert.equal(dot(renderNotice()), 1)
+  configure(enabled, { writable: true })
+
+  const close = action(renderNotice(), 'diagFamilyDisable')
+  // Even the panel action must use the latest sibling options and revision.
+  configure({ ...enabled, localizePrompt: true }, { revision: 9 })
+  env.setConfigMutation(() => false)
+  assert.equal(await close.props.onClick(), false)
+  assert.deepEqual(write(), { ns: 'dsh-gemini-native', revision: 9, ops: [{
+    op: 'set', path, value: { ...enabled, localizePrompt: true, gemini4FamilyReplay: false },
+  }] })
+  assert.match(text(renderNotice()), /设置已在别处更改/u)
+  env.setConfigMutation(() => { throw new Error('private transport failure') })
+  assert.equal(await action(renderNotice(), 'diagFamilyDisable').props.onClick(), false)
+  assert.match(text(renderNotice()), /未能保存 Gemini Native 设置/u)
+  assert.doesNotMatch(text(renderNotice()), /private transport failure/u)
+
+  configure(enabled, { revision: 10 })
+  let resolveWrite
+  env.setConfigMutation(() => new Promise(resolve => { resolveWrite = resolve }))
+  const saveAction = action(renderNotice(), 'diagFamilyDisable')
+  env.mockDocument.activeElement = saveAction
+  const pending = saveAction.props.onClick()
+  assert.equal(env.mockDocument.activeElement, panelEl)
+  const saving = renderNotice()
+  assert.equal(action(saving, 'diagFamilyDisable').props.disabled, true)
+  assert.equal(action(saving, 'diagFamilyDisable').props['aria-busy'], true)
+  assert.match(text(saving), /保存中/u)
+  assert.deepEqual(write().ops, [{ op: 'unset', path }])
+  configure({}, { revision: 11 })
+  resolveWrite(true)
+  assert.equal(await pending, true)
+  const manuallyRetry = renderNotice()
+  assert.match(text(manuallyRetry), /签名可能不兼容。.*已为此供应商关闭跨模型互通，可以手动重试/u)
+  assert.doesNotMatch(text(manuallyRetry), /可关闭后重试/u)
+  assert.doesNotMatch(text(renderNotice(env.tEn)), /Turn off cross-model replay and retry/u)
+  assert.equal(env.mockDocument.activeElement, panelEl)
+  assert.equal(dot(manuallyRetry), 1, 'this is still the request that saw the 400')
+  assert.equal(action(manuallyRetry, 'diagFamilyEnable'), undefined, 'do not nudge re-enable for the same error')
+  assert.equal(action(manuallyRetry, 'diagFamilyDisable'), undefined)
+  assert.equal(env.fetchCalls.length, 0, 'the diagnostic never resends a request')
+
+  emit({ ...candidates, crossModelHttp400: false })
+  const next = renderNotice()
+  assert.equal(dot(next), 0)
+  assert.equal(findAll(next, node => node.props?.role === 'alert').length, 0)
+  assert.doesNotMatch(text(next), /本次请求携带了跨模型原生历史|手动重试/u)
+  assert.ok(action(next, 'diagFamilyEnable'), 'only a later request may offer opt-in again')
+  env.React.__unmount(instance)
+  env.disposeEffects()
+})
+
+test('NativeStatusNotice focuses the portaled dialog, restores focus on Escape, and dismisses without stealing outside focus', async () => {
   const env = await loadClient({
     configValue: { routes: {} },
     supportsAnchor: false,
+    viewportWidth: 470,
   })
   const noticeSlot = env.slots.get('conversation.composer.dock:dsh-gemini-native-notice')
   const instance = createInstance()
   const rootEl = {
-    contains: target => target === 'inside-root',
+    contains: target => target === triggerEl || target === 'inside-root',
     getBoundingClientRect: () => ({ left: 48, top: 640, right: 200, bottom: 664 }),
   }
+  const triggerEl = { focus({ preventScroll }) {
+    assert.equal(preventScroll, true)
+    env.mockDocument.activeElement = triggerEl
+  } }
   const panelEl = {
-    contains: target => target === 'inside-panel',
+    contains: target => target === panelEl || target === 'inside-panel',
+    focus({ preventScroll }) {
+      assert.equal(preventScroll, true)
+      env.mockDocument.activeElement = panelEl
+    },
   }
+  const outsideEl = {}
 
   const renderNotice = () => {
     env.React.__beginRender(instance)
@@ -758,6 +1083,8 @@ test('NativeStatusNotice dialog closes on Escape, outside pointerdown, and captu
       // Bind mock DOM elements to the refs allocated by useDiagDialog.
       const anchor = tree
       if (anchor?.props?.ref) anchor.props.ref.current = rootEl
+      const [trigger] = findAll(tree, n => n.props?.className === 'dsh-gn-dock-pill')
+      trigger.props.ref.current = triggerEl
       const portal = findAll(tree, n => n.type === env.PORTAL_TYPE)[0]
       const dialog = portal ? findAll(portal, n => n.props?.role === 'dialog')[0] : null
       if (dialog?.props?.ref) dialog.props.ref.current = panelEl
@@ -775,9 +1102,11 @@ test('NativeStatusNotice dialog closes on Escape, outside pointerdown, and captu
   // Second render after layout effect picks up fallbackPos.
   tree = renderNotice()
   const dialog = findAll(tree, n => n.props?.role === 'dialog')[0]
-  assert.equal(dialog.props.style.left, '48px')
+  assert.equal(dialog.props.style.left, '38px', 'leave space for a 420px panel and the right gutter')
   assert.equal(dialog.props.style.bottom, '168px')
   assert.equal(dialog.props.style.top, 'auto')
+  assert.equal(dialog.props.tabIndex, -1)
+  assert.equal(env.mockDocument.activeElement, panelEl)
 
   // Inside pointerdown / click keeps dialog open.
   env.mockDocument.dispatch('pointerdown', { target: 'inside-panel' })
@@ -785,26 +1114,34 @@ test('NativeStatusNotice dialog closes on Escape, outside pointerdown, and captu
   tree = renderNotice()
   assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
 
-  // Capture-phase outside click (e.g. clicking sibling DSH pill) closes dialog immediately.
+  // Capture-phase outside click (e.g. clicking sibling DSH pill) closes without grabbing focus.
+  env.mockDocument.activeElement = outsideEl
   env.mockDocument.dispatch('click', { target: 'sibling-pill' }, { captureOnly: true })
   tree = renderNotice()
   assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+  assert.equal(env.mockDocument.activeElement, outsideEl)
 
-  // Reopen, then outside pointerdown closes.
+  // Reopen, then outside pointerdown closes without a forced return.
   findAll(tree, n => n.type === 'button')[0].props.onClick()
   tree = renderNotice()
   assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
+  env.mockDocument.activeElement = outsideEl
   env.mockDocument.dispatch('pointerdown', { target: 'outside-area' })
   tree = renderNotice()
   assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+  assert.equal(env.mockDocument.activeElement, outsideEl)
 
-  // Reopen, then Escape closes.
-  findAll(tree, n => n.type === 'button')[0].props.onClick()
-  tree = renderNotice()
-  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
-  env.mockDocument.dispatch('keydown', { key: 'Escape' })
-  tree = renderNotice()
-  assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+  // Escape closes and restores focus from inside. An outside keyboard focus stays outside.
+  for (const focused of [panelEl, outsideEl]) {
+    findAll(tree, n => n.type === 'button')[0].props.onClick()
+    tree = renderNotice()
+    assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], true)
+    env.mockDocument.activeElement = focused
+    env.mockDocument.dispatch('keydown', { key: 'Escape' })
+    tree = renderNotice()
+    assert.equal(findAll(tree, n => n.type === 'button')[0].props['aria-expanded'], false)
+    assert.equal(env.mockDocument.activeElement, focused === panelEl ? triggerEl : outsideEl)
+  }
 
   // Without ReactDOM/document.body, toggling open does not crash and omits portal.
   const noPortalEnv = await loadClient({

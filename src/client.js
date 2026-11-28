@@ -15,6 +15,10 @@ window.__ModuleLoader__.load({
       nativeHistory: 'Native history replay',
       nativeHistoryTitle: 'Record and replay native parts, including thought signatures and server-side tool data.',
       nativeHistoryPrivacy: 'Native history is on by default and adds response data to the Session log. That data can be shared or exported. Turning off replay does not erase existing data. Disable official Session Log uploads before uninstalling.',
+      gemini4FamilyReplay: 'Gemini 4 cross-model replay',
+      gemini4FamilyHelp: 'Requires Native history replay. Tries to keep native history and thought signatures when switching between Carbon, Argon, Neon, and Hydrogen. One provider or gateway may use different upstreams and return HTTP 400. Implicit cache hits are not guaranteed.',
+      experimental: 'Experimental',
+      gemini4FamilySummary: 'Gemini 4 cross-model replay · Experimental',
       googleSearch: 'Google Search',
       googleSearchTitle: 'Replace built-in web_search with Google Search run by Gemini. Search queries can include information from this conversation.',
       searchWithoutHistoryWarn: 'Without native history replay, follow-up turns after mixing Google Search with local tools may fail.',
@@ -58,6 +62,14 @@ window.__ModuleLoader__.load({
       diagWarnRecordOverflow: 'Last response exceeded the 2 MiB native recording limit and was not recorded.',
       diagWarnRecordInvalid: 'Last response SSE frames were invalid; skipped native recording.',
       diagWarnSearchSkipped: 'Incompatible toolConfig present; native Google Search was not injected.',
+      diagWarnCrossModel400: 'This request included cross-model native history and the upstream returned HTTP 400; thought signatures may be incompatible. Turn off cross-model replay and retry.',
+      diagWarnCrossModel400Closed: 'This request included cross-model native history and the upstream returned HTTP 400; thought signatures may be incompatible.',
+      diagFamilyCandidatesTpl: '{count} steps from other Gemini 4 models on this provider may be replayable.',
+      diagFamilyEnable: 'Enable experimental Gemini 4 replay for this provider',
+      diagFamilyRisk: 'Use only with the same compatible upstream. Mixed routing may return HTTP 400.',
+      diagFamilyDisable: 'Turn off cross-model replay for this provider',
+      diagFamilyScope: 'Applies to all sessions on this provider starting with the next request.',
+      diagFamilyDisabled: 'Cross-model replay is off for this provider. You can retry manually.',
       diagPromptLabel: 'Prompt localization',
       diagPromptMatchedTpl: 'Replaced {matched} / {total}',
       diagPromptMissedTpl: 'Unmatched built-ins: {names}',
@@ -65,11 +77,19 @@ window.__ModuleLoader__.load({
       diagPromptLogEn: 'Log prompt is English',
       diagPromptPending: 'Awaiting request',
       diagHistoryLabel: 'Native history',
-      diagHistoryReplayHitTpl: 'Replay matched {replayed} / {total} steps',
-      diagHistoryPartialFallback: 'partial fallback',
+      diagHistoryReplayTpl: 'Native replay: {replayed} / {total} steps',
+      diagHistoryCurrentReplayTpl: 'Same-model replay: {replayed} / {total} steps',
+      diagHistorySameModelHitsTpl: 'Same-model hits: {count}',
+      diagHistoryCrossModelHitsTpl: 'Cross-model hits: {count}',
+      diagHistoryNoCurrent: 'No history from the current model and provider',
+      diagHistoryOtherModelTpl: 'Steps from other models or providers sent in standard format: {count}',
+      diagHistoryUnmatchedTpl: 'Unmatched same-model steps sent in standard format: {count}',
+      diagHistoryUnclassifiedTpl: 'Steps sent in standard format (reason not classified): {count}',
+      diagHistoryNoHistory: 'No history to replay yet',
       diagHistoryCumulativeTpl: 'total {size}',
       diagHistoryLastRecordingTpl: 'last recording {size}',
-      diagHistoryDurableTpl: '{consecutive} / {total} steps · {size}',
+      diagHistoryDurableTpl: 'Native data recorded in log: {recorded} / {total} steps · {size}',
+      diagHistoryNoStats: 'No replay stats for this model yet',
       diagHistoryNoneInSession: 'No native records in session',
       diagHistoryEmpty: 'No native data recorded yet',
       diagLogUploadLabel: 'Official log',
@@ -92,6 +112,10 @@ window.__ModuleLoader__.load({
       nativeHistory: '原生历史回放',
       nativeHistoryTitle: '录制并回放 Gemini 原生 parts，包括思维签名与服务端工具数据。',
       nativeHistoryPrivacy: '原生回放默认开启，会向会话日志写入额外的响应数据。分享或导出会话时可能包含这些数据。关闭开关不会清除已有记录；卸载前请先关闭 DSH 官方会话日志上传。',
+      gemini4FamilyReplay: 'Gemini 4 家族跨模型互通',
+      gemini4FamilyHelp: '需开启原生历史回放。在同一供应商内切换 Carbon、Argon、Neon、Hydrogen 时尝试保留历史与思维签名。同一供应商或网关不一定连接同一上游，可能报 HTTP 400；不保证命中隐式缓存。',
+      experimental: '实验性',
+      gemini4FamilySummary: 'Gemini 4 互通 · 实验性',
       googleSearch: 'Google 原生搜索',
       googleSearchTitle: '由 Gemini 在服务端执行 Google 搜索，替换内置 web_search。搜索词可能包含本会话中的信息。',
       searchWithoutHistoryWarn: '未开启原生历史回放时，混用 Google 原生搜索与本地工具的续轮可能失败。',
@@ -135,6 +159,14 @@ window.__ModuleLoader__.load({
       diagWarnRecordOverflow: '最近响应超过 2 MiB 原生录制上限，未录制该响应',
       diagWarnRecordInvalid: '最近响应 SSE 帧异常，已跳过原生录制',
       diagWarnSearchSkipped: '存在不兼容的 toolConfig，Google 原生搜索未注入',
+      diagWarnCrossModel400: '本次请求携带了跨模型原生历史，上游返回 HTTP 400；签名可能不兼容，可关闭后重试。',
+      diagWarnCrossModel400Closed: '本次请求携带了跨模型原生历史，上游返回 HTTP 400；签名可能不兼容。',
+      diagFamilyCandidatesTpl: '同一供应商下有 {count} 步来自其他 Gemini 4 模型，可尝试原生回放。',
+      diagFamilyEnable: '为此供应商开启实验性互通',
+      diagFamilyRisk: '仅适用于连接同一兼容上游的模型；混用上游可能报 HTTP 400。',
+      diagFamilyDisable: '为此供应商关闭跨模型互通',
+      diagFamilyScope: '对该供应商的所有会话生效，从下一次请求开始。',
+      diagFamilyDisabled: '已为此供应商关闭跨模型互通，可以手动重试。',
       diagPromptLabel: '提示词汉化',
       diagPromptMatchedTpl: '已替换 {matched} / {total} 段',
       diagPromptMissedTpl: '未匹配内置段: {names}',
@@ -142,11 +174,19 @@ window.__ModuleLoader__.load({
       diagPromptLogEn: '日志提示词为英文',
       diagPromptPending: '等待请求确认',
       diagHistoryLabel: '原生历史',
-      diagHistoryReplayHitTpl: '回放命中 {replayed} / {total} 步',
-      diagHistoryPartialFallback: '部分回退',
+      diagHistoryReplayTpl: '原生回放 {replayed} / {total} 步',
+      diagHistoryCurrentReplayTpl: '同模型回放 {replayed} / {total} 步',
+      diagHistorySameModelHitsTpl: '同模型命中 {count} 步',
+      diagHistoryCrossModelHitsTpl: '跨模型命中 {count} 步',
+      diagHistoryNoCurrent: '暂无当前供应商和模型的历史',
+      diagHistoryOtherModelTpl: '其他模型或供应商的 {count} 步按兼容格式发送',
+      diagHistoryUnmatchedTpl: '同模型有 {count} 步未命中，按兼容格式发送',
+      diagHistoryUnclassifiedTpl: '{count} 步按兼容格式发送（原因未分类）',
+      diagHistoryNoHistory: '暂无历史可回放',
       diagHistoryCumulativeTpl: '累计 {size}',
       diagHistoryLastRecordingTpl: '最近一次录制 {size}',
-      diagHistoryDurableTpl: '连续 {consecutive} / {total} 步 · {size}',
+      diagHistoryDurableTpl: '日志已记录 {recorded} / {total} 步 · {size}',
+      diagHistoryNoStats: '暂无当前模型的回放统计',
       diagHistoryNoneInSession: '本会话尚无原生记录',
       diagHistoryEmpty: '尚无原生记录',
       diagLogUploadLabel: '官方日志',
@@ -374,6 +414,16 @@ button.dsh-gn-dock-pill:focus-visible {
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
   overflow-wrap: anywhere;
+}
+.dsh-gn-diag-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 6px;
+}
+.dsh-gn-diag-details .dsh-gn-diag-action {
+  align-items: flex-end;
 }
 .dsh-gn-diag-hint {
   margin: 10px 0 0;
@@ -788,7 +838,17 @@ button.dsh-gn-dock-pill:focus-visible {
       return typeof model === 'string' && /^(?:models\/)?gemini-4-(?:neon|hydrogen)(?:$|[-.@])/iu.test(model)
     }
 
-    const emptyRouteEntry = { localizePrompt: false, nativeHistory: false, googleSearch: false }
+    // Mirror the Host allowlist exactly, not XHigh's permissive suffix matching.
+    // Google documents returning the previous model's turns and signatures unchanged:
+    // https://aistudio.google.com/docs/choosing-a-model.md?generate-content=true#pair-models
+    // https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen.md#migrate-from-gemini-4-argon
+    const gemini4FamilyModels = new Set(['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen'])
+
+    function supportsGemini4FamilyReplay(model) {
+      return typeof model === 'string' && gemini4FamilyModels.has(model.toLowerCase().replace(/^models\//u, ''))
+    }
+
+    const emptyRouteEntry = { localizePrompt: false, nativeHistory: false, googleSearch: false, gemini4FamilyReplay: false }
 
     function routeEntryOf(routes, providerId) {
       const entry = typeof providerId === 'string' && providerId.length > 0 && routes && Object.hasOwn(routes, providerId)
@@ -798,6 +858,7 @@ button.dsh-gn-dock-pill:focus-visible {
         localizePrompt: entry?.localizePrompt === true,
         nativeHistory: entry?.nativeHistory !== false,
         googleSearch: entry?.googleSearch === true,
+        gemini4FamilyReplay: entry?.gemini4FamilyReplay === true,
       }
     }
 
@@ -876,7 +937,11 @@ button.dsh-gn-dock-pill:focus-visible {
       h('path', { d: 'M9.40051 6.59959C9.17233 6.3667 8.89997 6.18169 8.59939 6.05538C8.2988 5.92907 7.97603 5.86401 7.64999 5.86401C7.32395 5.86401 7.00118 5.92907 6.70059 6.05538C6.40001 6.18169 6.12765 6.3667 5.89946 6.59959L3.09863 9.40043C2.63436 9.8647 2.37354 10.4944 2.37354 11.151C2.37354 11.8075 2.63436 12.4372 3.09863 12.9015C3.56289 13.3657 4.19258 13.6266 4.84915 13.6266C5.50572 13.6266 6.13541 13.3657 6.59967 12.9015L6.94978 12.5514', stroke: 'currentColor' }))
     }
 
-    function useFormMutator(form) {
+    function isWritableForm(snapshot) {
+      return snapshot?.status === 'ready' && snapshot.writable === true && Number.isSafeInteger(snapshot.revision)
+    }
+
+    function useFormMutator(form, scope) {
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState(null)
       const active = React.useRef(true)
@@ -886,36 +951,56 @@ button.dsh-gn-dock-pill:focus-visible {
         return () => { active.current = false }
       }, [])
 
-      const run = React.useCallback(async (ops) => {
+      const run = React.useCallback(async (edit) => {
         if (busyRef.current) return false
-        const current = form.getSnapshot ? form.getSnapshot() : form.state
-        if (!current || current.status !== 'ready' || current.writable !== true || typeof current.revision !== 'number') return false
+        const current = form?.getSnapshot ? form.getSnapshot() : form?.state
+        if (!isWritableForm(current)) return false
         busyRef.current = true
         setBusy(true)
         setError(null)
         try {
-          const ok = await form.mutate(ops, current.revision)
+          // Build the operation from the same snapshot whose revision fences the write.
+          const ops = typeof edit === 'function' ? edit(current) : edit
+          const ok = ops !== null && await form.mutate(ops, current.revision)
           if (!active.current) return ok
-          if (!ok) setError('saveConflict')
+          if (!ok) setError({ scope, key: 'saveConflict' })
           return ok
         } catch {
-          if (active.current) setError('saveFailed')
+          if (active.current) setError({ scope, key: 'saveFailed' })
           return false
         } finally {
           busyRef.current = false
           if (active.current) setBusy(false)
         }
-      }, [form])
+      }, [form, scope])
 
-      return { busy, error, run }
+      return { busy, error: error && error.scope === scope ? error.key : null, run }
+    }
+
+    function isDefaultRoute(entry) {
+      return entry.nativeHistory && !entry.localizePrompt && !entry.googleSearch && !entry.gemini4FamilyReplay
+    }
+
+    function updateProviderRoute(run, providerId, field, value) {
+      return run(snapshot => {
+        const current = routeEntryOf(snapshot.value?.routes, providerId)
+        if (field === 'gemini4FamilyReplay' && value && !current.nativeHistory) return null
+        const next = { ...current, [field]: value }
+        const path = ['routes', providerId]
+        // Unsetting re-inherits the composition, which may differ from bundle defaults.
+        const base = routeEntryOf(snapshot.base?.routes, providerId)
+        return [isDefaultRoute(next) && isDefaultRoute(base)
+          ? { op: 'unset', path }
+          : { op: 'set', path, value: next }]
+      })
     }
 
     function ProviderCardNativeOptions({ provider, configured, t, configForm, subscribeConfig, getConfig, subscribeModels, getModels }) {
       const configSnap = React.useSyncExternalStore(subscribeConfig, getConfig)
       const modelsSnap = React.useSyncExternalStore(subscribeModels, getModels)
-      const { busy, error, run } = useFormMutator(configForm)
-
       const providerId = provider?.provider
+      const { busy, error, run } = useFormMutator(configForm, providerId)
+      const familyHelpId = React.useId()
       if (!providerId || configSnap.status !== 'ready') return null
 
       const routes = configSnap.value?.routes
@@ -929,15 +1014,9 @@ button.dsh-gn-dock-pill:focus-visible {
       if (!eligible && !hasSaved) return null
       if (!configured && !hasSaved) return null
 
-      const writable = configSnap.writable === true
+      const writable = isWritableForm(configSnap)
       const disabled = !writable || busy
-
-      function updateRoute(next) {
-        const ops = !next.nativeHistory || next.localizePrompt || next.googleSearch
-          ? [{ op: 'set', path: ['routes', providerId], value: next }]
-          : [{ op: 'unset', path: ['routes', providerId] }]
-        run(ops)
-      }
+      const familyDisabled = disabled || !current.nativeHistory
 
       if (!eligible && hasSaved) {
         return h('div', { style: cardSection },
@@ -978,11 +1057,23 @@ button.dsh-gn-dock-pill:focus-visible {
             type: 'checkbox',
             checked: current[field],
             disabled,
-            onChange: event => {
-              updateRoute({ ...current, [field]: event.target.checked })
-            },
+            onChange: event => updateProviderRoute(run, providerId, field, event.target.checked),
           }),
           h('span', null, label)))),
+        h('div', { style: { marginInlineStart: 8, paddingInlineStart: 10, borderInlineStart: '1px solid var(--dsw-alias-border-l3)' } },
+          h('label', {
+            style: { ...checkboxLabel, flexWrap: 'wrap', opacity: familyDisabled ? 0.65 : 1, cursor: familyDisabled ? 'default' : 'pointer' },
+          },
+          h('input', {
+            type: 'checkbox',
+            checked: current.gemini4FamilyReplay,
+            disabled: familyDisabled,
+            'aria-describedby': familyHelpId,
+            onChange: event => updateProviderRoute(run, providerId, 'gemini4FamilyReplay', event.target.checked),
+          }),
+          h('span', null, t('gemini4FamilyReplay')),
+          h('span', { style: badgeStyle }, t('experimental'))),
+          h('p', { id: familyHelpId, style: caption }, t('gemini4FamilyHelp'))),
         h('p', { style: caption }, t('nativeHistoryPrivacy')),
         current.googleSearch && !current.nativeHistory
           ? h('p', { role: 'status', style: warnCaption }, t('searchWithoutHistoryWarn'))
@@ -1039,6 +1130,7 @@ button.dsh-gn-dock-pill:focus-visible {
                 entry.localizePrompt && t('localizePrompt'),
                 t(entry.nativeHistory ? 'nativeHistory' : 'nativeHistoryOff'),
                 entry.googleSearch && t('googleSearch'),
+                providers !== null && !stale && entry.nativeHistory && entry.gemini4FamilyReplay && t('gemini4FamilySummary'),
               ].filter(Boolean)
               return h('li', {
                 key: providerId,
@@ -1153,11 +1245,16 @@ button.dsh-gn-dock-pill:focus-visible {
 
     let fallbackAnchorSeq = 0
 
-    function useDiagDialog(resetKey) {
+    function focusWithoutScroll(ref) {
+      ref.current?.focus?.({ preventScroll: true })
+    }
+
+    function useDiagDialog(resetKey, active) {
       const [open, setOpen] = React.useState(false)
       const [fallbackPos, setFallbackPos] = React.useState(null)
       const rootRef = React.useRef(null)
       const panelRef = React.useRef(null)
+      const triggerRef = React.useRef(null)
       const anchorSeqRef = React.useRef(null)
       const reactId = typeof React.useId === 'function' ? React.useId().replaceAll(':', '') : null
       if (!reactId && !anchorSeqRef.current) anchorSeqRef.current = `gn${++fallbackAnchorSeq}`
@@ -1169,14 +1266,16 @@ button.dsh-gn-dock-pill:focus-visible {
       }, [resetKey])
 
       React.useEffect(() => {
-        if (!open || typeof document === 'undefined') return
+        if (!active || !open || typeof document === 'undefined') return
         const isInside = target => {
           if (!target) return false
           if (typeof Node !== 'undefined' && !(target instanceof Node)) return false
           return rootRef.current?.contains?.(target) === true || panelRef.current?.contains?.(target) === true
         }
         const onKeyDown = e => {
-          if (e?.key === 'Escape') setOpen(false)
+          if (e?.key !== 'Escape') return
+          if (isInside(document.activeElement)) focusWithoutScroll(triggerRef)
+          setOpen(false)
         }
         const onPointerDown = e => {
           if (!isInside(e?.target)) setOpen(false)
@@ -1192,9 +1291,13 @@ button.dsh-gn-dock-pill:focus-visible {
           document.removeEventListener?.('pointerdown', onPointerDown)
           document.removeEventListener?.('click', onClickCapture, true)
         }
-      }, [open])
+      }, [active, open])
 
       const useLayout = React.useLayoutEffect || React.useEffect
+      // The portal is appended to body, outside the trigger's document tab order.
+      useLayout(() => {
+        if (active && open) focusWithoutScroll(panelRef)
+      }, [active, open])
       useLayout(() => {
         if (!open || supportsAnchor || typeof window === 'undefined') {
           if (!open) setFallbackPos(null)
@@ -1205,7 +1308,8 @@ button.dsh-gn-dock-pill:focus-visible {
           if (!rect) return
           const vw = Number.isFinite(window.innerWidth) ? window.innerWidth : 1024
           const vh = Number.isFinite(window.innerHeight) ? window.innerHeight : 768
-          const left = Math.max(12, Math.min(rect.left, vw - 312))
+          // Match the panel's CSS max width and leave the right gutter intact.
+          const left = Math.max(12, Math.min(rect.left, vw - 432))
           const bottom = Math.max(12, vh - rect.top + 8)
           setFallbackPos({ left, bottom })
         }
@@ -1214,7 +1318,7 @@ button.dsh-gn-dock-pill:focus-visible {
         return () => window.removeEventListener?.('resize', update)
       }, [open, supportsAnchor])
 
-      return { open, setOpen, rootRef, panelRef, anchorName, supportsAnchor, fallbackPos }
+      return { open, setOpen, rootRef, panelRef, triggerRef, anchorName, supportsAnchor, fallbackPos }
     }
 
     function collectWarnings(transport, t) {
@@ -1251,32 +1355,69 @@ button.dsh-gn-dock-pill:focus-visible {
       const recordedBytes = activeTransport?.recordStatus === 'saved' ? activeTransport.recordedBytes ?? 0 : 0
       if (routeCfg.nativeHistory || diag?.hasNativePayload) {
         let value
-        if (activeTransport && Number.isFinite(activeTransport.totalHistoryTurns) && activeTransport.totalHistoryTurns > 0) {
-          const total = activeTransport.totalHistoryTurns
-          const replayed = activeTransport.replayedHistoryTurns ?? 0
-          const parts = [fmt(t('diagHistoryReplayHitTpl'), { replayed, total })]
-          if (replayed < total) parts[0] += ` (${t('diagHistoryPartialFallback')})`
-          if ((diag?.nativeBytes ?? 0) > 0) parts.push(fmt(t('diagHistoryCumulativeTpl'), { size: formatBytes(diag.nativeBytes) }))
-          else if (recordedBytes > 0) parts.push(fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) }))
-          value = parts.join(' · ')
-        } else if ((diag?.assistantSteps ?? 0) > 0) {
-          if (diag.nativeSteps === 0) {
-            value = recordedBytes > 0
-              ? fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) })
-              : t('diagHistoryNoneInSession')
+        let sub
+        const total = activeTransport?.totalHistoryTurns
+        const replayed = activeTransport?.replayedHistoryTurns
+        const current = activeTransport?.currentModelHistoryTurns
+        const hasReplayCounts = Number.isSafeInteger(total) && total >= 0
+          && Number.isSafeInteger(replayed) && replayed >= 0 && replayed <= total
+        if (hasReplayCounts && total === 0) {
+          value = t('diagHistoryNoHistory')
+        } else if (hasReplayCounts) {
+          const same = activeTransport?.sameModelReplayedTurns
+          const cross = activeTransport?.crossModelReplayedTurns
+          const legacy = same === undefined && cross === undefined
+          const hasSplit = Number.isSafeInteger(same) && same >= 0
+            && Number.isSafeInteger(cross) && cross >= 0 && same === replayed - cross
+          // Legacy Hosts only replayed same-model history. A partial or invalid
+          // new snapshot cannot make that claim, even if it has a `current` count.
+          const sameHits = legacy ? replayed : same
+          const crossHits = legacy ? 0 : cross
+          const classified = (legacy || hasSplit) && Number.isSafeInteger(current)
+            && sameHits <= current && current <= total - crossHits
+          const details = []
+          if (hasSplit && cross > 0) {
+            value = fmt(t('diagHistoryReplayTpl'), { replayed, total })
+            details.push(fmt(t('diagHistorySameModelHitsTpl'), { count: same }), fmt(t('diagHistoryCrossModelHitsTpl'), { count: cross }))
+          } else if (classified) {
+            value = current === 0 ? t('diagHistoryNoCurrent')
+              : fmt(t('diagHistoryCurrentReplayTpl'), { replayed, total: current })
           } else {
+            value = fmt(t('diagHistoryReplayTpl'), { replayed, total })
+          }
+          if (classified) {
+            const otherMisses = total - current - crossHits
+            const sameMisses = current - sameHits
+            if (otherMisses > 0) details.push(fmt(t('diagHistoryOtherModelTpl'), { count: otherMisses }))
+            if (sameMisses > 0) details.push(fmt(t('diagHistoryUnmatchedTpl'), { count: sameMisses }))
+          } else if (replayed < total) {
+            details.push(fmt(t('diagHistoryUnclassifiedTpl'), { count: total - replayed }))
+          }
+          sub = details.join(' · ')
+        } else if ((diag?.assistantSteps ?? 0) > 0) {
+          if (diag.nativeSteps > 0) {
             value = fmt(t('diagHistoryDurableTpl'), {
-              consecutive: diag.consecutiveNative ?? 0,
+              recorded: diag.nativeSteps,
               total: diag.assistantSteps,
               size: formatBytes(diag.nativeBytes ?? 0),
             })
+            sub = routeCfg.nativeHistory ? t('diagHistoryNoStats') : undefined
+          } else {
+            value = recordedBytes > 0
+              ? fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) })
+              : t('diagHistoryNoneInSession')
           }
         } else if (recordedBytes > 0) {
           value = fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) })
         } else {
           value = t('diagHistoryEmpty')
         }
-        rows.push({ key: 'history', label: t('diagHistoryLabel'), value })
+        if (hasReplayCounts) {
+          const size = (diag?.nativeBytes ?? 0) > 0 ? fmt(t('diagHistoryCumulativeTpl'), { size: formatBytes(diag.nativeBytes) })
+            : recordedBytes > 0 ? fmt(t('diagHistoryLastRecordingTpl'), { size: formatBytes(recordedBytes) }) : null
+          if (size) value += ` · ${size}`
+        }
+        rows.push({ key: 'history', label: t('diagHistoryLabel'), value, sub })
         rows.push({
           key: 'logUpload',
           label: t('diagLogUploadLabel'),
@@ -1621,6 +1762,7 @@ button.dsh-gn-dock-pill:focus-visible {
           const legacyProvider = typeof selected === 'string' ? selected : undefined
           const provider = selectedObj?.provider ?? legacyProvider ?? modelState?.current?.provider
           const model = selectedObj?.model ?? modelState?.current?.model
+          const { busy, error, run } = useFormMutator(config, JSON.stringify([sessionId, provider, model]))
 
           const profile = modelsSnap.status === 'ready' ? modelsSnap.value?.providers?.[provider] : undefined
           const ready = snapshot.status === 'ready' && snapshot.value?.showStatusNotice !== false
@@ -1629,7 +1771,9 @@ button.dsh-gn-dock-pill:focus-visible {
           const active = ready && hasAnyNativeFeature(routeCfg)
 
           const telemetry = useStatusTelemetry(active ? sessionId : null)
-          const { open, setOpen, rootRef, panelRef, anchorName, supportsAnchor, fallbackPos } = useDiagDialog(`${sessionId ?? ''}:${provider ?? ''}`)
+          const {
+            open, setOpen, rootRef, panelRef, triggerRef, anchorName, supportsAnchor, fallbackPos,
+          } = useDiagDialog(`${sessionId ?? ''}:${provider ?? ''}`, active)
 
           if (!active) return null
 
@@ -1651,12 +1795,39 @@ button.dsh-gn-dock-pill:focus-visible {
             labelChildren.push(seg)
           })
 
+          // The Host reports correlation, not causation. Keep using the latest scoped
+          // request snapshot: the next request clears this alert without client retries.
+          const crossModelHttp400 = activeTransport?.crossModelHttp400 === true
           const warnings = collectWarnings(activeTransport, t)
-          const hasWarning = warnings.length > 0
+          const hasWarning = crossModelHttp400 || warnings.length > 0
 
           const canPortal = open && typeof ReactDOM?.createPortal === 'function' && typeof document !== 'undefined' && Boolean(document.body)
           let dialogPortal = null
           if (canPortal) {
+            const writable = isWritableForm(snapshot)
+            const candidates = activeTransport?.crossModelCandidateTurns
+            const offerFamilyReplay = !crossModelHttp400 && writable && routeCfg.nativeHistory
+              && !routeCfg.gemini4FamilyReplay && supportsGemini4FamilyReplay(model)
+              && Number.isSafeInteger(candidates) && candidates > 0
+            const familyScopeId = `${anchorName}-family-scope`
+            const familyRiskId = `${anchorName}-family-risk`
+            const familyAction = enabled => h('div', { className: 'dsh-gn-diag-action' },
+              h('button', {
+                type: 'button',
+                disabled: busy,
+                'aria-busy': busy || undefined,
+                'aria-describedby': enabled ? `${familyRiskId} ${familyScopeId}` : familyScopeId,
+                style: { ...secondaryButton, opacity: busy ? 0.6 : 1, cursor: busy ? 'default' : 'pointer' },
+                onClick: () => {
+                  // Saving disables this button and an accepted write can remove it.
+                  focusWithoutScroll(panelRef)
+                  return updateProviderRoute(run, provider, 'gemini4FamilyReplay', enabled)
+                },
+              }, t(enabled ? 'diagFamilyEnable' : 'diagFamilyDisable')),
+              enabled ? h('span', { id: familyRiskId, className: 'dsh-gn-diag-sub' }, t('diagFamilyRisk')) : null,
+              h('span', { id: familyScopeId, className: 'dsh-gn-diag-sub' }, t('diagFamilyScope')),
+              busy ? h('span', { role: 'status', style: caption }, t('saving')) : null,
+              error ? h('span', { role: 'alert', style: errorCaption }, t(error)) : null)
             const modelId = activeTransport?.model || model
             const group = modelState?.groups?.find(entry => entry.id === provider)
             const catalogModel = group?.models.find(entry => entry.id === modelId)
@@ -1688,6 +1859,7 @@ button.dsh-gn-dock-pill:focus-visible {
                 ref: panelRef,
                 className: 'dsh-gn-diag-panel',
                 role: 'dialog',
+                tabIndex: -1,
                 'aria-label': t('brand'),
                 style: panelStyle,
               },
@@ -1697,14 +1869,21 @@ button.dsh-gn-dock-pill:focus-visible {
                   h('span', null, t('brand'))),
                 h('span', { className: 'dsh-gn-diag-route', title: routeTitle }, routeLabel)),
               h('div', { className: 'dsh-gn-diag-rule', 'aria-hidden': 'true' }),
-              hasWarning ? h('div', { className: 'dsh-gn-diag-warns', role: 'alert' },
-                warnings.map((message, index) => h('div', { key: index, className: 'dsh-gn-diag-warn' }, message))) : null,
+              hasWarning ? h('div', { className: 'dsh-gn-diag-warns' },
+                crossModelHttp400 ? h('div', { className: 'dsh-gn-diag-warn' },
+                  h('div', { role: 'alert' }, t(routeCfg.gemini4FamilyReplay ? 'diagWarnCrossModel400' : 'diagWarnCrossModel400Closed')),
+                  routeCfg.gemini4FamilyReplay ? (writable ? familyAction(false) : null)
+                    : h('div', { role: 'status', className: 'dsh-gn-diag-sub' }, t('diagFamilyDisabled'))) : null,
+                warnings.map((message, index) => h('div', { key: index, role: 'alert', className: 'dsh-gn-diag-warn' }, message))) : null,
               rows.length > 0 ? h('dl', { className: 'dsh-gn-diag-details' },
                 rows.map(row => h(React.Fragment, { key: row.key },
                   h('dt', null, row.label),
                   h('dd', null,
                     h('span', null, row.value),
-                    row.sub ? h('div', { className: 'dsh-gn-diag-sub' }, row.sub) : null)))) : null,
+                    row.sub ? h('div', { className: 'dsh-gn-diag-sub' }, row.sub) : null,
+                    row.key === 'history' && offerFamilyReplay ? h(React.Fragment, null,
+                      h('div', { className: 'dsh-gn-diag-sub' }, fmt(t('diagFamilyCandidatesTpl'), { count: candidates })),
+                      familyAction(true)) : null)))) : null,
               !hasLiveTelemetry && !hasDurableStats
                 ? h('p', { className: 'dsh-gn-diag-hint' }, t('diagEmptyHint'))
                 : null),
@@ -1718,6 +1897,7 @@ button.dsh-gn-dock-pill:focus-visible {
             style: supportsAnchor ? { anchorName } : undefined,
           },
           h('button', {
+            ref: triggerRef,
             type: 'button',
             className: 'dsh-gn-dock-pill',
             'aria-haspopup': 'dialog',

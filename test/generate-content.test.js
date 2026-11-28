@@ -405,7 +405,7 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
           api: 'google-generative-ai', baseURL: 'https://native.test/v1beta', apiKeyEnv: 'NATIVE_KEY',
           models: [
             { id: model, reasoningEfforts: { off: null, medium: 'medium', high: 'high' } },
-            { id: 'gemini-3-flash' },
+            { id: 'gemini-4-neon' },
           ],
         },
       } } })
@@ -416,7 +416,7 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
       await ctx.loader.create({
         id: 'geminiNative',
         name: 'cordis:geminiNative',
-        config: { routes: { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } } },
+        config: { routes: { native: { localizePrompt: false, nativeHistory: true, gemini4FamilyReplay: true, googleSearch: true } } },
       })
       await ctx.loader.await()
       ctx.tools.register({
@@ -504,11 +504,12 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
 
     assert.deepEqual(await activity(), activityBefore, 'compaction must not publish search activity')
 
-    // 2. Cross-model compaction on the same provider (gemini-3-flash instead of gemini-4-hydrogen) must stay untouched.
+    // 2. A separately selected Neon compactor must stay untouched, even if
+    // it shares the conversation's provider and enrolled Gemini 4 family.
     const cross = await boot({
       auto: false,
       summarizationProvider: 'native',
-      summarizationModel: 'gemini-3-flash',
+      summarizationModel: 'gemini-4-neon',
     })
     const crossAgent = await cross.ctx.agentLoop.create('compaction-cross-model', {
       provider: 'native', model,
@@ -523,8 +524,10 @@ test('installed DSH: compaction aligns prefix byte-for-byte on same route withou
     assert.ok(crossCompacted)
     assert.equal(requests.length, beforeCrossCompact + 1)
     const crossReq = requests[beforeCrossCompact]
-    assert.match(crossReq.url.pathname, /\/models\/gemini-3-flash:streamGenerateContent$/u)
+    assert.match(crossReq.url.pathname, /\/models\/gemini-4-neon:streamGenerateContent$/u)
     assert.equal(crossReq.body.tools.some(tool => Object.hasOwn(tool, 'googleSearch')), false)
+    assert.ok(crossReq.body.contents.filter(entry => entry.role === 'model')
+      .every(entry => entry.parts.every(part => !Object.hasOwn(part, 'thoughtSignature'))))
     assert.deepEqual(
       crossReq.body.tools.flatMap(tool => tool.functionDeclarations?.map(fn => fn.name) ?? []),
       ['read_mock'],
@@ -573,11 +576,12 @@ test('patchGenerateContentBody counts totalModelTurns and replayedModelTurns acc
   assert.equal(userOnly.replayedModelTurns, 0)
 })
 
-test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighApplied, saved/overflow, and ignores compaction', async t => {
+test('geminiTransport reports url-mismatch, tool modes, recording, and latest request replay diagnostics', { timeout: 10_000 }, async t => {
   const handlers = new Map()
   const originalFetch = globalThis.fetch
   const recorded = []
   let routes = { native: { localizePrompt: false, nativeHistory: true, googleSearch: true } }
+  let xhighEnabled = true
   let responseFactory = () => sse([frame([{ text: 'ok' }], 'STOP')])
   globalThis.fetch = async (input, init) => responseFactory(input, init)
   t.after(() => { globalThis.fetch = originalFetch })
@@ -590,7 +594,7 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     logger: { warn() {} },
     on: (event, fn) => handlers.set(event, fn),
     effect: start => { cleanup = start() },
-  }, { routes: { get: () => routes } }, plugin.routeConfigOf, undefined, sessionId => sessionId === 'sess-1', (sessionId, snapshot) => {
+  }, { routes: { get: () => routes } }, plugin.routeConfigOf, undefined, sessionId => xhighEnabled && sessionId === 'sess-1', (sessionId, snapshot) => {
     recorded.push({ sessionId, snapshot })
   })
   t.after(() => cleanup?.())
@@ -604,9 +608,11 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     loop = true,
     purpose,
     stopBeforeFinish = false,
+    onResponse,
+    messages = [],
     body = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }], tools: [{ functionDeclarations: [declaration] }] },
   } = {}) {
-    const request = Object.freeze({ provider: 'native', model: targetModel, sessionId: 'sess-1', agent: loop, purpose, messages: [] })
+    const request = Object.freeze({ provider: 'native', model: targetModel, sessionId: 'sess-1', agent: loop, purpose, messages })
     const headers = new Headers({ 'content-length': '1' })
     const init = { method: 'POST', headers, signal: new AbortController().signal, body: JSON.stringify(body) }
     const input = `${targetBaseURL}/models/${targetModel}:streamGenerateContent?alt=sse`
@@ -614,7 +620,12 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
       await Promise.resolve()
       handlers.get('llm-pi-ai/request-headers')({ ...request, baseURL: targetBaseURL }, headers, () => headers)
       const res = await globalThis.fetch(input, init)
-      await res.text()
+      onResponse?.(res)
+      const text = await res.text()
+      if (!res.ok) {
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: text, status: res.status } } }
+        return
+      }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     })
@@ -634,6 +645,11 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
       status: 'url-mismatch',
       totalHistoryTurns: null,
       replayedHistoryTurns: null,
+      currentModelHistoryTurns: null,
+      sameModelReplayedTurns: null,
+      crossModelReplayedTurns: null,
+      crossModelCandidateTurns: null,
+      crossModelHttp400: false,
       searchConfigured: true,
       searchInjected: false,
       searchMode: 'skipped',
@@ -657,6 +673,11 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     status: 'ok',
     totalHistoryTurns: 0,
     replayedHistoryTurns: 0,
+    currentModelHistoryTurns: 0,
+    sameModelReplayedTurns: 0,
+    crossModelReplayedTurns: 0,
+    crossModelCandidateTurns: 0,
+    crossModelHttp400: false,
     searchConfigured: true,
     searchInjected: true,
     searchMode: 'mixed',
@@ -671,6 +692,27 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
   assert.equal(recorded[1].snapshot.recordStatus, 'saved')
   assert.equal(recorded[1].snapshot.recordedFrames, 1)
   assert.ok(recorded[1].snapshot.recordedBytes > 0)
+
+  const opening = { role: 'user', parts: [{ text: 'hi' }] }
+  const messages = ['native', 'native', 'another-provider'].map((provider, i) => ({
+    role: 'assistant',
+    source: { kind: 'model', provider, model: i === 1 ? 'gemini-4-neon' : model },
+    content: [{ type: 'text', text: `reply ${i}` }],
+  }))
+  const wireTurns = messages.map((_, i) => ({ role: 'model', parts: [{ text: `reply ${i}` }] }))
+  const bodyWithHistory = { contents: [opening, ...wireTurns, opening] }
+  recorded.length = 0
+  await runCall({ messages, body: bodyWithHistory })
+  assert.equal(recorded[0].snapshot.totalHistoryTurns, 3)
+  assert.equal(recorded[0].snapshot.replayedHistoryTurns, 0)
+  assert.equal(recorded[0].snapshot.currentModelHistoryTurns, 1)
+  assert.equal(recorded[1].snapshot.currentModelHistoryTurns, 1, 'the finalized snapshot keeps the outbound count')
+
+  // An adapter can omit an assistant message; don't guess which model made it to the wire.
+  recorded.length = 0
+  await runCall({ messages, body: { contents: [opening, ...wireTurns.slice(1), opening] } })
+  assert.equal(recorded[0].snapshot.totalHistoryTurns, 2)
+  assert.equal(recorded[0].snapshot.currentModelHistoryTurns, null)
 
   // Captured frames have not been saved if the consumer stops before finish.
   recorded.length = 0
@@ -717,6 +759,11 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     status: 'ok',
     totalHistoryTurns: null,
     replayedHistoryTurns: null,
+    currentModelHistoryTurns: null,
+    sameModelReplayedTurns: null,
+    crossModelReplayedTurns: null,
+    crossModelCandidateTurns: null,
+    crossModelHttp400: false,
     searchConfigured: true,
     searchInjected: false,
     searchMode: 'skipped',
@@ -728,4 +775,123 @@ test('geminiTransport reports url-mismatch, searchMode mixed/skipped, xhighAppli
     recordedFrames: null,
     recordStatus: null,
   })
+
+  const neon = 'gemini-4-neon'
+  const signed = { text: 'Different model reply', thoughtSignature: validSig('family') }
+  const sourceStep = sourceModel => {
+    const content = [{ type: 'text', text: signed.text }]
+    const replayState = { response: makeNativeReplayData(
+      { identity: 'family-fixture' }, sourceModel, [frame([signed], 'STOP').candidates], [], 'complete', undefined, content,
+    ) }
+    return { role: 'assistant', source: { kind: 'model', provider: 'native', model: sourceModel, replayState }, content }
+  }
+  const compatibleBody = { contents: [opening, { role: 'model', parts: [{ text: signed.text }] }, opening] }
+  const hydrogenHistory = [sourceStep(model)]
+  const followUp = { targetModel: neon, messages: hydrogenHistory, body: compatibleBody }
+  const family = { nativeHistory: true, gemini4FamilyReplay: true }
+  const forwarded = []
+  let upstream
+  responseFactory = (_input, init) => {
+    forwarded.push(JSON.parse(init.body))
+    return upstream ?? sse([frame([{ text: 'ok' }], 'STOP')])
+  }
+  const lastSnapshot = () => recorded.at(-1).snapshot
+  const badRequest = () => {
+    const res = new Response('unmodified upstream error', { status: 400 })
+    res.clone = () => assert.fail('diagnostics must not clone the upstream error')
+    return res
+  }
+
+  // 6. Fresh target model, with no same-model steps in the history.
+  routes = { native: { nativeHistory: true } }
+  upstream = badRequest()
+  await runCall(followUp)
+  assert.deepEqual(forwarded.at(-1).contents, compatibleBody.contents)
+  assert.equal(lastSnapshot().currentModelHistoryTurns, 0)
+  assert.equal(lastSnapshot().crossModelCandidateTurns, 1)
+  assert.equal(lastSnapshot().crossModelHttp400, false, 'a candidate was not sent natively')
+
+  routes = { native: family }
+  upstream = badRequest()
+  const beforeError = forwarded.length
+  await runCall({ ...followUp, onResponse: res => {
+    assert.strictEqual(res, upstream)
+    assert.equal(res.bodyUsed, false, 'the downstream still owns the error body')
+  } })
+  assert.equal(forwarded.length, beforeError + 1)
+  assert.deepEqual(forwarded.at(-1).contents[1].parts, [signed])
+  assert.equal(lastSnapshot().totalHistoryTurns, 1)
+  assert.equal(lastSnapshot().sameModelReplayedTurns, 0)
+  assert.equal(lastSnapshot().crossModelReplayedTurns, 1)
+  assert.equal(lastSnapshot().recordStatus, 'none')
+  assert.equal(lastSnapshot().crossModelHttp400, true, 'settlement preserves the response diagnostic')
+
+  // Omitted assistant steps keep reliable replay hits but not class totals.
+  upstream = undefined
+  await runCall({ ...followUp, messages: [
+    { role: 'assistant', source: { provider: 'native', model }, content: [{ type: 'reasoning', text: 'Only a thought' }] },
+    ...hydrogenHistory,
+  ] })
+  assert.equal(lastSnapshot().totalHistoryTurns, 1)
+  assert.equal(lastSnapshot().crossModelReplayedTurns, 1)
+  assert.equal(lastSnapshot().currentModelHistoryTurns, null)
+  assert.equal(lastSnapshot().crossModelCandidateTurns, null)
+  assert.equal(lastSnapshot().crossModelHttp400, false)
+
+  // Even with the flag on, only same-route compaction is intercepted, and it
+  // must never upgrade another family's model entry to native parts.
+  routes = { native: { ...family, googleSearch: true } }
+  const reportCount = recorded.length
+  await runCall({ ...followUp, loop: false, purpose: 'compaction' })
+  assert.deepEqual(forwarded.at(-1), compatibleBody)
+  await runCall({ ...followUp, loop: false, purpose: 'compaction', targetModel: model, messages: [sourceStep(neon)] })
+  assert.deepEqual(forwarded.at(-1).contents, compatibleBody.contents)
+  assert.deepEqual(forwarded.at(-1).tools, [{ googleSearch: {} }], 'same-route compaction still aligns Search')
+  assert.equal(recorded.length, reportCount)
+
+  routes = { native: { ...family, nativeHistory: false } }
+  await runCall(followUp)
+  assert.deepEqual(forwarded.at(-1).contents, compatibleBody.contents, 'the parent switch gates the saved child preference')
+  assert.equal(lastSnapshot().crossModelReplayedTurns, null)
+
+  // An older 400 cannot overwrite a newer request for the same session.
+  routes = { native: family }
+  const delayed = Promise.withResolvers()
+  const sent = Promise.withResolvers()
+  upstream = delayed.promise
+  const forward = responseFactory
+  responseFactory = (input, init) => {
+    const response = forward(input, init)
+    sent.resolve()
+    return response
+  }
+  const earlier = runCall(followUp)
+  let settledCount
+  try {
+    await sent.promise
+    routes = { native: { nativeHistory: true, gemini4FamilyReplay: false } }
+    upstream = undefined
+    await runCall(followUp)
+    settledCount = recorded.length
+    assert.equal(lastSnapshot().crossModelHttp400, false)
+    assert.equal(lastSnapshot().crossModelReplayedTurns, 0)
+    assert.deepEqual(forwarded.at(-1).contents, compatibleBody.contents)
+  } finally {
+    delayed.resolve(badRequest())
+    await earlier
+  }
+  assert.equal(recorded.length, settledCount)
+  assert.equal(lastSnapshot().crossModelHttp400, false)
+
+  // A main request that no longer needs interception also supersedes alarms.
+  routes = { native: family }
+  upstream = badRequest()
+  await runCall(followUp)
+  assert.equal(lastSnapshot().crossModelHttp400, true)
+  routes = { native: { ...family, nativeHistory: false, localizePrompt: true } }
+  xhighEnabled = false
+  upstream = undefined
+  await runCall(followUp)
+  assert.deepEqual(forwarded.at(-1), compatibleBody)
+  assert.equal(lastSnapshot(), null)
 })

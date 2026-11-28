@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  attachNativeReplay, hasNativeReplay, historyFingerprint, makeNativeReplayData, makeReplayState,
+  attachNativeReplay, hasNativeReplay, historyFingerprint, isGemini4FamilyModel, makeNativeReplayData, makeReplayState,
   nativeReplayOf, patchGenerateContentBody, readNativeReplay, routeIdentity,
 } from '../src/generate-content.js'
 import { nativeSearchProjection } from '../src/native-search-projection.js'
@@ -650,4 +650,94 @@ test('patchGenerateContentBody aligns compaction requests with native history an
   assert.deepEqual(titleOut.body.contents[1].parts, mainBody.contents[1].parts)
   assert.equal(titleOut.body.contents[2].parts[0].functionResponse.id, localId)
   assert.equal(titleOut.body.toolConfig, undefined)
+})
+
+test('only exact Gemini 4 family IDs participate, including case-insensitive models/ resources', () => {
+  const models = ['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen', 'MoDeLs/GEMINI-4-NEON']
+  const rejected = [
+    undefined, '', 'gemini-3.1-pro', 'gemini-2.5-pro', 'gemini-4-other', 'gemini-4-neon-preview',
+    'gemini-4-argon@custom', 'gemini-4-hydrogen-tts', 'gemini-4-carbon-image',
+    'gemini-4-neon\n', 'models/models/gemini-4-neon', 'tunedModels/gemini-4-hydrogen',
+  ]
+  const raw = textEntry('Earlier model reply', 'signed-reply')
+  const body = { contents: [userEntry('Ask'), textEntry(raw.parts[0].text), userEntry('Continue')] }
+  const opts = { ...route, googleSearch: false, gemini4FamilyReplay: true }
+  function patch(sourceModel, targetModel, { sourceProvider = 'gemini', storedModel = sourceModel, enabled = true } = {}) {
+    const source = message({ response: { ...v1.response, model: storedModel, frames: [[selected(raw.parts)]], callIds: [] } },
+      [{ type: 'text', text: raw.parts[0].text }])
+    Object.assign(source.source, { provider: sourceProvider, model: sourceModel })
+    return patchGenerateContentBody(body, { ...geminiRequest([source]), model: targetModel }, { ...opts, gemini4FamilyReplay: enabled })
+  }
+  for (const sourceModel of models) {
+    assert.equal(isGemini4FamilyModel(sourceModel), true)
+    for (const targetModel of models) {
+      if (targetModel === sourceModel) continue
+      const out = patch(sourceModel, targetModel)
+      assert.deepEqual(out.body.contents[1], raw, `${sourceModel} → ${targetModel}`)
+      assert.equal(out.replayedModelTurns, 1)
+      assert.equal(out.sameModelReplayedTurns, 0)
+      assert.equal(out.crossModelReplayedTurns, 1)
+      assert.equal(out.crossModelCandidateTurns, 1)
+    }
+  }
+  const [source, target] = models
+  for (const modelId of rejected) {
+    assert.equal(isGemini4FamilyModel(modelId), false, String(modelId))
+    assert.strictEqual(patch(modelId, target).body, body)
+    assert.strictEqual(patch(source, modelId).body, body)
+  }
+  for (const overrides of [{ sourceProvider: 'other' }, { storedModel: target }]) {
+    const out = patch(source, target, overrides)
+    assert.strictEqual(out.body, body)
+    assert.equal(out.crossModelCandidateTurns, 0)
+  }
+  const disabled = patch(source, target, { enabled: false })
+  assert.strictEqual(disabled.body, body)
+  assert.equal(disabled.replayedModelTurns, 0)
+  assert.equal(disabled.crossModelCandidateTurns, 1, 'report a viable candidate even with no same-model replay')
+})
+
+test('family replay restores validated v2 parts and calls without weakening alignment or Search circulation', () => {
+  const sourceModel = 'gemini-4-hydrogen'
+  const targetModel = 'gemini-4-neon'
+  const envelope = makeReplayState(route, sourceModel, frames, [localId], 'complete', prefix, blocks)
+  assert.ok(envelope.response.refs.length > 0)
+  const source = message(envelope, blocks)
+  source.source.model = sourceModel
+  const thoughtOnly = [{ type: 'reasoning', text: 'No visible content' }]
+  const omitted = message(makeReplayState(route, sourceModel, [[selected([
+    { thought: true, text: thoughtOnly[0].text, thoughtSignature: 'signed-thought' },
+  ])]], [], 'complete', prefix, thoughtOnly), thoughtOnly)
+  omitted.source.model = sourceModel
+  const req = { ...geminiRequest([omitted, source]), model: targetModel }
+  const [opening, wireCall, result] = wireBody().contents
+  // pi-ai strips foreign thinking and emits no model Content for a pure thought.
+  const normalizedCall = { ...wireCall, parts: wireCall.parts.filter(part => !part.thought) }
+  const body = { contents: [opening, normalizedCall, result] }
+  const opts = { ...route, gemini4FamilyReplay: true }
+  const out = patchGenerateContentBody(body, req, opts)
+  assert.equal(out.totalModelTurns, 1)
+  assert.equal(out.crossModelReplayedTurns, 1)
+  assert.equal(out.crossModelCandidateTurns, 1)
+  assert.deepEqual(out.body.contents, [opening, { role: 'model', parts }, userEntry({
+    functionResponse: { ...result.parts[0].functionResponse, id: 'wire-read-9' },
+  })])
+  assert.equal(out.body.toolConfig.includeServerSideToolInvocations, true)
+
+  const withThinking = { contents: [opening, wireCall, result] }
+  const noCirculation = { ...body, toolConfig: { includeServerSideToolInvocations: false } }
+  const corrupt = clone(source)
+  corrupt.source.replayState.response.digest = 'wrong digest'
+  const incomplete = clone(source)
+  incomplete.source.replayState.response.outcome = 'truncated'
+  for (const [wire, request] of [
+    [withThinking, req], [noCirculation, req],
+    [body, { ...req, messages: [corrupt] }], [body, { ...req, messages: [incomplete] }],
+    [body, { ...req, purpose: 'compaction' }],
+  ]) {
+    const skipped = patchGenerateContentBody(wire, request, opts)
+    assert.strictEqual(skipped.body.contents, wire.contents)
+    assert.equal(skipped.crossModelReplayedTurns, 0)
+    assert.equal(skipped.crossModelCandidateTurns, 0)
+  }
 })

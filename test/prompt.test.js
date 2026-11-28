@@ -84,6 +84,7 @@ test('translates only exact built-in sections from the downstream presentation',
 test('validates route config schema and keeps fields editable by DSH Settings', () => {
   assert.throws(() => plugin.Config({ routes: { google: { localizePrompt: 'yes' } } }))
   assert.throws(() => plugin.Config({ routes: { google: { nativeHistory: 1 } } }))
+  assert.throws(() => plugin.Config({ routes: { google: { gemini4FamilyReplay: 'yes' } } }))
   assert.throws(() => plugin.Config({ routes: { google: { googleSearch: 'mixed' } } }))
   assert.equal(plugin.Config.dict.routes.meta.volatile, true)
   assert.equal(plugin.Config.dict.showStatusNotice.meta.volatile, true)
@@ -93,11 +94,14 @@ test('validates route config schema and keeps fields editable by DSH Settings', 
   assert.deepEqual(plugin.routeConfigOf(defaults.routes.get(), 'google'), {
     localizePrompt: false,
     nativeHistory: true,
+    gemini4FamilyReplay: false,
     googleSearch: false,
   })
-  const configured = plugin.Config({ routes: { google: {}, disabled: { nativeHistory: false } } })
+  const configured = plugin.Config({ routes: { google: {}, disabled: { nativeHistory: false, gemini4FamilyReplay: true } } })
   assert.equal(configured.routes.get().google.nativeHistory, true)
+  assert.equal(configured.routes.get().google.gemini4FamilyReplay, false)
   assert.equal(plugin.routeConfigOf(configured.routes.get(), 'disabled').nativeHistory, false)
+  assert.equal(plugin.routeConfigOf(configured.routes.get(), 'disabled').gemini4FamilyReplay, true, 'retain the saved child preference')
 })
 
 const installed = process.env.DSH_INSTALL_DIR
@@ -156,7 +160,7 @@ test('installed DSH: mount from bundle patch, render, update per-provider routes
   await ctx.settings.mutate(row.id, enableOps, form.revision)
   const afterEnable = ctx.settings.describe()[0]
   assert.deepEqual(afterEnable.value, {
-    routes: { 'gemini-relay': { localizePrompt: true, nativeHistory: true, googleSearch: false } },
+    routes: { 'gemini-relay': { localizePrompt: true, nativeHistory: true, gemini4FamilyReplay: false, googleSearch: false } },
     showStatusNotice: false,
   })
   await assert.rejects(ctx.settings.mutate(row.id, enableOps, form.revision), /revision/i)

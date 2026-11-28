@@ -10,6 +10,17 @@ const nameRef = 2
 const argsRef = 4
 const dshWebSearch = 'web_search'
 
+// Google documents replaying prior model turns and signatures unchanged on
+// generateContent model switches. Allow only the documented general models,
+// not arbitrary aliases with suffixes or specialized output modalities.
+// https://aistudio.google.com/docs/choosing-a-model.md?generate-content=true#pair-models
+// https://aistudio.google.com/docs/whats-new-gemini-4-hydrogen.md#migrate-from-gemini-4-argon
+const gemini4FamilyModels = new Set(['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon', 'gemini-4-hydrogen'])
+
+export function isGemini4FamilyModel(model) {
+  return typeof model === 'string' && gemini4FamilyModels.has(model.toLowerCase().replace(/^models\//u, ''))
+}
+
 export const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const hasFunctions = tool => Array.isArray(tool?.functionDeclarations) && tool.functionDeclarations.length > 0
 
@@ -457,10 +468,10 @@ export function applyGoogleSearchTools(body, enableSearch, requiresCirculation =
   return { body: changed ? next : body, changed }
 }
 
-// Match pi-ai's own provider + model policy within generateContent. DSH's
-// LlmRuntime.forAdapter excludes replay from other adapters, but multiple
-// configured providers can share one adapter. Do not match just the model ID:
-// gateways report incompatible signatures on cross-transport failover.
+// DSH's LlmRuntime.forAdapter excludes replay from other adapters, but sharing
+// a configured provider or gateway does not establish a shared backend. Keep
+// cross-model replay opt-in: gateways report incompatible signatures on
+// cross-transport failover.
 // https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/src/index.ts
 // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-shared.ts
 // https://github.com/vercel/ai/issues/14196
@@ -469,19 +480,25 @@ export function applyGoogleSearchTools(body, enableSearch, requiresCirculation =
 // https://github.com/router-for-me/CLIProxyAPI/pull/7016 (Vertex bare-Tink)
 // https://github.com/router-for-me/CLIProxyAPI/issues/7484 (gateway translation)
 // https://github.com/heyhuynhgiabuu/proxypal/issues/146
-// Google documents some same-backend cross-model replay, not arbitrary relays:
-// https://aistudio.google.com/docs/choosing-a-model.md?generate-content=true#pair-models
-function indexNativeAssistants({ provider, model, messages, purpose }) {
+function indexNativeAssistants({ provider, model, messages, purpose }, route) {
   if ((purpose !== undefined && purpose !== 'compaction') || !Array.isArray(messages)
     || typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return
+  const canConsiderFamily = purpose === undefined && isGemini4FamilyModel(model)
   const assistants = []
   const byPrefix = new Map()
-  let hasReplay = false
+  let hasNativeCandidate = false
   for (const message of messages) {
     if (message?.role !== 'assistant' || !Array.isArray(message.content) || !message.content.every(isObject)) continue
-    const metadata = extractNativeData(message.source?.replayState)
-    const sameDomain = message.source?.provider === provider && message.source?.model === model
-    const replayable = sameDomain && metadata?.model === model && metadata.outcome === 'complete'
+    const { provider: sourceProvider, model: sourceModel, replayState } = message.source ?? {}
+    const metadata = extractNativeData(replayState)
+    const sameModel = sourceProvider === provider && sourceModel === model
+    const otherFamilyModel = canConsiderFamily && sourceProvider === provider && sourceModel !== model
+      && isGemini4FamilyModel(sourceModel)
+    const familyCompatible = otherFamilyModel && route.gemini4FamilyReplay === true
+    // The record must belong to its source message, not to the target model.
+    const complete = metadata?.model === sourceModel && metadata?.outcome === 'complete'
+    const replayable = (sameModel || familyCompatible) && complete
+    const crossModelCandidate = otherFamilyModel && complete
     if (typeof metadata?.prefix === 'string') {
       const bucket = byPrefix.get(metadata.prefix)
       if (bucket) bucket.push(assistants.length)
@@ -489,10 +506,10 @@ function indexNativeAssistants({ provider, model, messages, purpose }) {
     }
     // Ineligible steps still occupy positions. Filtering them out here could
     // attach a native record to a cross-provider or unrecorded lookalike.
-    assistants.push({ message, replayable, sameDomain })
-    hasReplay ||= replayable
+    assistants.push({ message, replayable, sameModel, crossModelCandidate })
+    hasNativeCandidate ||= replayable || crossModelCandidate
   }
-  if (!hasReplay) return
+  if (!hasNativeCandidate) return
   for (const assistant of assistants) Object.assign(assistant, sourceAssistantShape(assistant.message.content))
   return { assistants, byPrefix }
 }
@@ -565,9 +582,10 @@ function wireAssistantShape(parts) {
 
 function matchesAssistant(assistant, wire) {
   // An emitted signed blank still proves the source had that kind of block.
-  // pi-ai never emits a thinking block from a foreign provider/model.
+  // pi-ai strips cross-model thinking even if native replay is compatible.
+  // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/transform-messages.ts
   const hasThinking = wire.textKinds.has('reasoning')
-  if (hasThinking && !assistant.sameDomain) return false
+  if (hasThinking && !assistant.sameModel) return false
   if (assistant.shape !== wire.shape && (hasThinking || assistant.withoutReasoning !== wire.shape)) return false
   for (const kind of wire.textKinds) if (!assistant.textKinds.has(kind)) return false
   return wire.wireCalls.every((call, i) => {
@@ -578,8 +596,8 @@ function matchesAssistant(assistant, wire) {
   })
 }
 
-function alignAssistants(contents, request) {
-  const index = indexNativeAssistants(request)
+function alignAssistants(contents, request, route) {
+  const index = indexNativeAssistants(request, route)
   if (!index) return
   const { assistants } = index
   const byPosition = new Map()
@@ -720,14 +738,14 @@ export function patchGenerateContentBody(body, request, route) {
   const systemParts = Array.isArray(body.systemInstruction?.parts)
     ? body.systemInstruction.parts
     : typeof body.systemInstruction === 'string' ? [{ text: body.systemInstruction }] : []
-  const alignment = alignAssistants(body.contents, request)
+  const alignment = alignAssistants(body.contents, request, route)
   // Keep the legacy [systemParts, contents] fingerprint for tie-breaking and
   // stable compaction requests, not as a replay gate. DSH's signature prefix
   // binding is Anthropic-only:
   // https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-pi-ai/src/prefix-binding.ts
-  // Gemini 4 only supports implicit caching (4,096 token minimum; at least
-  // 2,050 new tokens for full previous-request reuse). Stable prefixes can
-  // help, but actual reuse is reported as usageMetadata.cachedContentTokenCount.
+  // Cross-model replay preserves history, not Gemini's implicit cache. Stable
+  // prefixes can help on the same model, but actual reuse is reported as
+  // usageMetadata.cachedContentTokenCount.
   // https://aistudio.google.com/docs/caching.md?generate-content=true#implicit-caching
   const prefixHash = alignment?.byPrefix.size > 0
     ? createHash('sha256').update(`[${JSON.stringify(systemParts)},[`) : null
@@ -742,10 +760,12 @@ export function patchGenerateContentBody(body, request, route) {
   const patchedContents = [...body.contents]
   let requiresCirculation = false
   let totalModelTurns = 0
-  let replayedModelTurns = 0
+  let sameModelReplayedTurns = 0
+  let crossModelReplayedTurns = 0
+  const crossModelCandidates = new Set()
 
   for (const [i, entry] of body.contents.entries()) {
-    if (entry?.role === 'model' && Array.isArray(entry.parts)) {
+    if (entry?.role === 'model') {
       totalModelTurns++
       const slot = alignment?.byPosition.get(i)
       if (slot) {
@@ -760,16 +780,23 @@ export function patchGenerateContentBody(body, request, route) {
           ? matchByPrefix(alignment, prefixHash.copy().update(']]').digest('hex'), wire, first, latest) : undefined
         assistantCursor = first + 1
         const assistant = alignment.assistants[matched]
-        const native = assistant?.replayable ? nativeHistory(assistant.message, allowCirculation) : undefined
+        // Count only aligned, validated candidates, even when the option is
+        // off. In particular, never advertise a thought-only step pi-ai omitted.
+        const native = assistant?.replayable || assistant?.crossModelCandidate
+          ? nativeHistory(assistant.message, allowCirculation) : undefined
         if (native && preservesWireSignatures(entry.parts, native)) {
           const next = body.contents[i + 1]
           const response = alignFunctionResponses(next, native, wire.wireCalls)
           if (response) {
-            assistantCursor = matched + 1
-            replayedModelTurns++
-            requiresCirculation ||= native.requiresCirculation
-            patchedContents[i] = { ...entry, parts: native.parts }
-            if (response.entry !== next) patchedContents[i + 1] = response.entry
+            if (assistant.crossModelCandidate) crossModelCandidates.add(matched)
+            if (assistant.replayable) {
+              assistantCursor = matched + 1
+              if (assistant.sameModel) sameModelReplayedTurns++
+              else crossModelReplayedTurns++
+              requiresCirculation ||= native.requiresCirculation
+              patchedContents[i] = { ...entry, parts: native.parts }
+              if (response.entry !== next) patchedContents[i + 1] = response.entry
+            }
           }
         }
       }
@@ -781,6 +808,7 @@ export function patchGenerateContentBody(body, request, route) {
   }
 
   const nextPrefix = prefixHash?.update(']]').digest('hex') ?? historyFingerprint(patchedContents, systemParts)
+  const replayedModelTurns = sameModelReplayedTurns + crossModelReplayedTurns
   const contentsChanged = replayedModelTurns > 0
   const contentBody = contentsChanged ? { ...body, contents: patchedContents } : body
   const tools = applyGoogleSearchTools(contentBody, route.googleSearch === true, requiresCirculation)
@@ -790,5 +818,8 @@ export function patchGenerateContentBody(body, request, route) {
     prefix: nextPrefix,
     totalModelTurns,
     replayedModelTurns,
+    sameModelReplayedTurns,
+    crossModelReplayedTurns,
+    crossModelCandidateTurns: crossModelCandidates.size,
   }
 }

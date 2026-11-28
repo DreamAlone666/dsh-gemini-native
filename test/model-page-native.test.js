@@ -47,6 +47,11 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     ctx.loader.builtins.pi = pi
     ctx.loader.builtins.geminiNative = plugin
     ctx.provide('profileContext', { home: root })
+    const fetchRoutes = new Map()
+    ctx.provide('connection', { fetch: { register(route) {
+      fetchRoutes.set(route.path, route)
+      return () => fetchRoutes.delete(route.path)
+    } } })
     const entryIds = ['llm-pi-ai', geminiNative]
     const entries = () => entryIds.flatMap(id => { try { return [ctx.loader.resolve(id)] } catch { return [] } })
     ctx.provide('configEditor', {
@@ -82,19 +87,24 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     assert.deepEqual(await modelCatalog(), [model])
 
     const requests = []
+    const gatewayError = 'offline status'
+    const defaultParts = [{ text: 'Offline Gemini', unknown: 'extra part data' }]
     let gatewayStatus = 200
+    let rejectBody
+    let replyParts = defaultParts
     globalThis.fetch = async (input, init) => {
       const path = new URL(input).pathname
       const headers = new Headers(init.headers)
-      requests.push({ path, headers, body: JSON.parse(init.body) })
-      if (gatewayStatus !== 200 || path.endsWith('/chat/completions')) {
-        return Response.json({ error: { message: 'offline status' } }, { status: gatewayStatus === 200 ? 400 : gatewayStatus })
+      const body = JSON.parse(init.body)
+      requests.push({ path, headers, body })
+      if (gatewayStatus !== 200 || path.endsWith('/chat/completions') || rejectBody?.(body)) {
+        return Response.json({ error: { message: gatewayError } }, { status: gatewayStatus === 200 ? 400 : gatewayStatus })
       }
-      const payload = { candidates: [{ content: { role: 'model', parts: [{ text: 'Offline Gemini', unknown: 'extra part data' }] }, finishReason: 'STOP' }] }
+      const payload = { candidates: [{ content: { role: 'model', parts: replyParts }, finishReason: 'STOP' }] }
       return new Response(`data: ${JSON.stringify(payload)}\n\n`, { headers: { 'content-type': 'text/event-stream' } })
     }
-    const prepare = async (options = {}, { loop = true, provider = routeId } = {}) => {
-      const prepared = await ctx.llm.prepareCall({ provider, model })
+    const prepare = async (options = {}, { loop = true, provider = routeId, targetModel = model } = {}) => {
+      const prepared = await ctx.llm.prepareCall({ provider, model: targetModel })
       const request = { ...prepared.config, tools, sessionId: 'models-offline', messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }], ...options }
       if (loop) llm.markAgentLoopRequest(request)
       return prepared.stream(Object.freeze(request))
@@ -168,6 +178,113 @@ test('real Models settings mutate the same provider to and from Gemini, reusing 
     assert.ok(isNative(await finish(await prepare())), 'clearing route restores default replay')
     assert.ok(!requests.at(-1).body.tools.some(tool => tool.googleSearch))
     assert.deepEqual(route().value.providers[routeId], originalRoute)
+
+    await t.test('a provider opt-in replays Gemini 4 history across models and can be cleared after HTTP 400', async t => {
+      const neon = 'gemini-4-neon'
+      const neonResource = 'models/GEMINI-4-NEON'
+      await mutate('llm-pi-ai', [{
+        op: 'set', path: ['providers', routeId, 'models'], value: [model, neon, neonResource].map(id => ({ id })),
+      }])
+      const nativeForm = () => ctx.settings.describe().find(row => row.ns === geminiNative)
+      assert.equal(nativeForm().value.routes[routeId], undefined, 'start with no provider override')
+
+      const sessionId = 'models-offline-family'
+      const statusPath = '/api/dsh-gemini-native/status'
+      const checkStatus = async (replayed, warned, candidates) => {
+        // Connect after consuming the LLM stream so this is the settled snapshot,
+        // not a transient frame that could be overwritten by stream finalization.
+        const response = await fetchRoutes.get(statusPath).fetch(new Request(`http://localhost${statusPath}?sessionId=${sessionId}`))
+        assert.match(response.headers.get('content-type'), /^text\/event-stream/u)
+        const reader = response.body.getReader()
+        try {
+          const frame = await reader.read()
+          assert.equal(frame.done, false)
+          const { transport } = JSON.parse(new TextDecoder().decode(frame.value).slice('data: '.length))
+          const expected = {
+            provider: routeId, model: neon, totalHistoryTurns: 1, currentModelHistoryTurns: 0,
+            replayedHistoryTurns: replayed, sameModelReplayedTurns: 0,
+            crossModelReplayedTurns: replayed, crossModelHttp400: warned,
+            ...(candidates === undefined ? {} : { crossModelCandidateTurns: candidates }),
+          }
+          for (const [key, value] of Object.entries(expected)) assert.equal(transport?.[key], value, key)
+        } finally {
+          await reader.cancel()
+        }
+      }
+
+      const signature = label => Buffer.from(label).toString('base64')
+      const rawId = 'offline/call'
+      const visibleText = 'I will read the notes.'
+      const callSignature = signature('call')
+      const functionCall = { id: rawId, name: 'read_mock', args: { path: 'notes.txt' } }
+      const rawParts = [
+        { thought: true, text: 'Plan the read.', thoughtSignature: signature('thinking') },
+        { text: visibleText, thoughtSignature: signature('text') },
+        { functionCall, thoughtSignature: callSignature },
+      ]
+      t.after(() => { replyParts = defaultParts; rejectBody = undefined })
+      // The relay rejects the replayed signature even after the local setting changes.
+      rejectBody = body => body.contents.some(entry => entry.role === 'model'
+        && entry.parts.some(part => part.functionCall && part.thoughtSignature === callSignature))
+      replyParts = rawParts
+      const user = text => llm.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
+      const opening = user('Read the notes.')
+      const assembler = new llm.BlockAssembler()
+      for await (const chunk of await prepare({ sessionId, messages: [opening] })) assembler.push(chunk)
+      replyParts = defaultParts
+      assert.equal(assembler.finish.kind, 'tool-calls')
+      const hydrogen = assembler.message({ provider: routeId, model, replayState: assembler.replayState })
+      assert.ok(hasNativeReplay({ type: 'assistant/message', data: { message: hydrogen } }), 'native history records by default')
+      const call = hydrogen.content.find(block => block.type === 'tool-call')
+      assert.equal(call?.id, rawId)
+      const result = llm.createToolResultMessage({ callId: call.id, content: [{ type: 'text', text: 'Found the notes.' }], isError: false })
+      // Each Neon request sees the same history: no previously committed Neon turn.
+      const messages = [opening, hydrogen, result, user('Now summarize the notes.')]
+      const runNeon = async (targetModel = neon) => {
+        const before = requests.length
+        const terminal = await finish(await prepare({ sessionId, messages }, { targetModel }))
+        assert.equal(requests.length, before + 1, 'each manual invocation makes one upstream request')
+        const { path, body } = requests[before]
+        const resource = targetModel.startsWith('models/') ? targetModel : `models/${targetModel}`
+        assert.equal(path, `/v1beta/${resource}:streamGenerateContent`)
+        return { terminal, contents: body.contents }
+      }
+      const compatibleId = 'offline_call'
+      const assertCompatible = contents => {
+        assert.deepEqual(contents[1], { role: 'model', parts: [
+          { text: visibleText }, { functionCall: { ...functionCall, id: compatibleId } },
+        ] }, 'pi-ai strips cross-model thinking and signatures')
+        assert.equal(contents[2].parts[0].functionResponse.id, compatibleId)
+      }
+
+      const baseline = await runNeon()
+      assert.equal(baseline.terminal.reason.kind, 'stop')
+      assertCompatible(baseline.contents)
+      await checkStatus(0, false, 1)
+
+      await setRoute({ gemini4FamilyReplay: true })
+      assert.equal(nativeForm().value.routes[routeId].gemini4FamilyReplay, true)
+      assert.equal(nativeForm().value.routes[routeId].nativeHistory, true, 'the opt-in alone keeps native history on')
+      const rejected = await runNeon()
+      assert.equal(rejected.terminal.reason.kind, 'error')
+      assert.ok(rejected.terminal.reason.failure.message.includes(gatewayError), 'the SDK still receives the original 400 body')
+      assert.deepEqual(rejected.contents[1], { role: 'model', parts: rawParts })
+      assert.equal(rejected.contents[2].parts[0].functionResponse.id, rawId)
+      await checkStatus(1, true)
+
+      const withResourcePrefix = await runNeon(neonResource)
+      assert.equal(withResourcePrefix.terminal.reason.kind, 'error', 'the resource alias also sent the rejected native parts')
+      assert.deepEqual(withResourcePrefix.contents[1], { role: 'model', parts: rawParts })
+      assert.equal(withResourcePrefix.contents[2].parts[0].functionResponse.id, rawId)
+
+      await setRoute(undefined)
+      assert.equal(nativeForm().value.routes[routeId], undefined, 'clear the only override using the current form revision')
+      const retried = await runNeon()
+      assert.equal(retried.terminal.reason.kind, 'stop')
+      assert.ok(isNative(retried.terminal), 'clearing the family opt-in does not disable recording')
+      assertCompatible(retried.contents)
+      await checkStatus(0, false, 1)
+    })
 
     await setRoute({ localizePrompt: false, nativeHistory: true, googleSearch: false })
     gatewayStatus = 400

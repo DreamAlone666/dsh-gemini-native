@@ -46,16 +46,31 @@ function normalizeStats(stats) {
   return { matched: stats.matched, total: stats.total, missedBuiltins }
 }
 
+const nonNegativeCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null
+
 function normalizeTransport(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return null
+  const total = nonNegativeCount(snapshot.totalHistoryTurns)
+  const replayed = nonNegativeCount(snapshot.replayedHistoryTurns)
+  const same = nonNegativeCount(snapshot.sameModelReplayedTurns)
+  const cross = nonNegativeCount(snapshot.crossModelReplayedTurns)
+  const current = nonNegativeCount(snapshot.currentModelHistoryTurns)
+  const candidates = nonNegativeCount(snapshot.crossModelCandidateTurns)
+  const validReplay = total !== null && replayed !== null && replayed <= total
+    && same !== null && cross !== null && same + cross === replayed
+  const classified = validReplay && current !== null && same <= current && cross <= total - current
   return {
     provider: typeof snapshot.provider === 'string' ? snapshot.provider : '',
     model: typeof snapshot.model === 'string' ? snapshot.model : '',
     status: snapshot.status === 'url-mismatch' ? 'url-mismatch' : 'ok',
-    totalHistoryTurns: Number.isSafeInteger(snapshot.totalHistoryTurns) && snapshot.totalHistoryTurns >= 0
-      ? snapshot.totalHistoryTurns : null,
-    replayedHistoryTurns: Number.isSafeInteger(snapshot.replayedHistoryTurns) && snapshot.replayedHistoryTurns >= 0
-      ? snapshot.replayedHistoryTurns : null,
+    totalHistoryTurns: total,
+    replayedHistoryTurns: validReplay ? replayed : null,
+    currentModelHistoryTurns: classified ? current : null,
+    sameModelReplayedTurns: validReplay ? same : null,
+    crossModelReplayedTurns: validReplay ? cross : null,
+    crossModelCandidateTurns: classified && candidates !== null && cross <= candidates && candidates <= total - current
+      ? candidates : null,
+    crossModelHttp400: validReplay && cross > 0 && snapshot.crossModelHttp400 === true,
     searchConfigured: snapshot.searchConfigured === true,
     searchInjected: snapshot.searchInjected === true,
     searchMode: ['mixed', 'search-only', 'skipped', 'off'].includes(snapshot.searchMode) ? snapshot.searchMode : 'off',
@@ -193,12 +208,13 @@ export function localizationNotice(ctx, config, routeConfigOf) {
       candidates.set(signal, { sessionId, provider, prompt, stats: normalizeStats(stats) })
     },
     recordTransport(sessionId, snapshot) {
-      if (!config.showStatusNotice.get()) return
       if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) return
       if (snapshot === null) {
+        // Allow invalidation while hidden so reopening cannot revive an old alert.
         updateSession(sessionId, { transport: null })
         return
       }
+      if (!config.showStatusNotice.get()) return
       const transport = normalizeTransport(snapshot)
       if (!transport) return
       updateSession(sessionId, { transport })

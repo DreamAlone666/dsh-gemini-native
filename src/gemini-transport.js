@@ -1,14 +1,15 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { collectGoogleSearchEvidence, observeGoogleSearchResponse, observeSseResponse } from './google-search-sse.js'
 import {
-  applyGoogleSearchTools, attachNativeReplay, isObject, makeNativeReplayData, normalizeEndpoint,
-  patchGenerateContentBody, responseFrame, routeIdentity,
+  applyGoogleSearchTools, attachNativeReplay, isGemini4FamilyModel, isObject, makeNativeReplayData,
+  normalizeEndpoint, patchGenerateContentBody, responseFrame, routeIdentity,
 } from './generate-content.js'
 import { applyXHighThinking, supportsXHighModel } from './xhigh.js'
 
 const nativeFrameLimit = 1024 * 1024
 const replayLimit = 2 * 1024 * 1024
 const candidateLimit = 4_096
+const recentTelemetryLimit = 256
 
 function generationUrl(baseURL, model) {
   // Mirror the Google Developer API's resource naming for ordinary model IDs.
@@ -57,7 +58,30 @@ function hasSearchTool(tools) {
     && (Object.hasOwn(tool, 'googleSearch') || Object.hasOwn(tool, 'google_search') || Object.hasOwn(tool, 'googleSearchRetrieval')))
 }
 
-function buildOutboundTelemetry(state, finalBody, historyStats) {
+function countCurrentModelHistoryTurns(state, historyStats) {
+  if (!historyStats || !Array.isArray(state.request.messages)) return null
+  let modelTurns = 0
+  let currentModelTurns = 0
+  for (const message of state.request.messages) {
+    if (message?.role !== 'assistant') continue
+    const { provider, model } = message.source ?? {}
+    if (typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return null
+    modelTurns++
+    if (provider === state.provider && model === state.model) currentModelTurns++
+  }
+  // Source identities are available on DSH messages, not on the Gemini body.
+  // A cross-model thought-only assistant can disappear in pi-ai's conversion.
+  // When counts disagree, keep only wire totals and actual replay hits.
+  // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/transform-messages.ts
+  // https://github.com/earendil-works/pi/blob/main/packages/ai/src/api/google-shared.ts
+  return modelTurns === historyStats.totalModelTurns
+    && historyStats.sameModelReplayedTurns <= currentModelTurns
+    && historyStats.crossModelReplayedTurns <= modelTurns - currentModelTurns
+    && historyStats.crossModelCandidateTurns <= modelTurns - currentModelTurns
+    ? currentModelTurns : null
+}
+
+function buildOutboundTelemetry(state, finalBody, historyStats, status = 'ok') {
   const localToolCount = countLocalTools(finalBody?.tools)
   const searchInjected = hasSearchTool(finalBody?.tools)
   const searchConfigured = state.googleSearch === true
@@ -70,12 +94,18 @@ function buildOutboundTelemetry(state, finalBody, historyStats) {
   const thinkingLevel = typeof rawThinkingLevel === 'string' && rawThinkingLevel.length > 0 ? rawThinkingLevel : null
   const xhighRequested = state.xhigh === true
   const xhighApplied = xhighRequested && thinkingLevel === 'XHIGH'
+  const currentModelHistoryTurns = countCurrentModelHistoryTurns(state, historyStats)
   return {
     provider: state.provider,
     model: state.model,
-    status: 'ok',
-    totalHistoryTurns: historyStats ? historyStats.totalModelTurns : null,
-    replayedHistoryTurns: historyStats ? historyStats.replayedModelTurns : null,
+    status,
+    totalHistoryTurns: historyStats?.totalModelTurns ?? null,
+    replayedHistoryTurns: historyStats?.replayedModelTurns ?? null,
+    currentModelHistoryTurns,
+    sameModelReplayedTurns: historyStats?.sameModelReplayedTurns ?? null,
+    crossModelReplayedTurns: historyStats?.crossModelReplayedTurns ?? null,
+    crossModelCandidateTurns: currentModelHistoryTurns === null ? null : historyStats.crossModelCandidateTurns,
+    crossModelHttp400: false,
     searchConfigured,
     searchInjected,
     searchMode,
@@ -175,6 +205,7 @@ function loopRequestPredicate(ctx) {
 
 export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEnabled, recordTransport, isGeminiRoute) {
   const scope = new AsyncLocalStorage()
+  const latestOutbound = new Map()
   let active = true
   let transport
   let warned = false
@@ -189,14 +220,42 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
     return active && state && !state.readOnly && recordTransport && (config.showStatusNotice?.get() ?? true)
   }
 
-  function report(state, snapshot) {
-    try { recordTransport(state.sessionId, snapshot) } catch { /* Diagnostics must not affect inference. */ }
+  function report(sessionId, snapshot) {
+    try { recordTransport(sessionId, snapshot) } catch { /* Diagnostics must not affect inference. */ }
+  }
+
+  function invalidateInteractiveTelemetry(sessionId) {
+    const previous = latestOutbound.get(sessionId)
+    if (!previous) return
+    latestOutbound.delete(sessionId)
+    // A new main request may bypass the fetch hook (e.g. native history was
+    // turned off). Clear old experimental actions even without fresh wire stats.
+    if (previous.crossModelHttp400 || previous.crossModelCandidateTurns > 0) report(sessionId, null)
+  }
+
+  function publishOutbound(state, snapshot) {
+    state.outboundTelemetry = snapshot
+    if (snapshot === null) {
+      invalidateInteractiveTelemetry(state.sessionId)
+      return
+    }
+    latestOutbound.delete(state.sessionId)
+    latestOutbound.set(state.sessionId, snapshot)
+    if (latestOutbound.size > recentTelemetryLimit) latestOutbound.delete(latestOutbound.keys().next().value)
+    report(state.sessionId, snapshot)
+  }
+
+  function isCurrentOutbound(state, telemetry) {
+    // Distinguish another fetch in this stream (SDK retries) from a newer
+    // stream for the same session. Either one supersedes the old diagnostics.
+    return telemetry !== null && state.outboundTelemetry === telemetry
+      && latestOutbound.get(state.sessionId) === telemetry
   }
 
   function reportStreamFinish(state) {
     const { capture, outboundTelemetry } = state
-    if (!capture || !outboundTelemetry || !recordsTelemetry(state)) return
-    report(state, {
+    if (!capture || !isCurrentOutbound(state, outboundTelemetry) || !recordsTelemetry(state)) return
+    publishOutbound(state, {
       ...outboundTelemetry,
       recordedBytes: capture.savedBytes,
       recordedFrames: capture.frames.length,
@@ -210,9 +269,12 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
     if (state.nativeHistory) {
       let baseURL
       try { baseURL = normalizeEndpoint(state.baseURL) } catch { return }
-      route = { baseURL, provider: state.provider, googleSearch: state.googleSearch }
-      // Preserve the v1/v2 route label for stored diagnostics. The patcher
-      // admits history by provider + model; baseURL selects the current request.
+      route = {
+        baseURL, provider: state.provider, googleSearch: state.googleSearch,
+        gemini4FamilyReplay: state.gemini4FamilyReplay,
+      }
+      // Preserve the v1/v2 route label for stored diagnostics, not as an
+      // attestation of the upstream behind this provider or baseURL.
       route.identity = routeIdentity(route)
       history = patchGenerateContentBody(body, state.request, route)
     }
@@ -221,26 +283,36 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
     return { body: thinking.body, changed: patched.changed || thinking.changed, route, history }
   }
 
-  function captureResponse(state, response, plan, reportSearch) {
+  function captureResponse(state, response, plan, reportSearch, telemetry) {
     const capture = {
       route: plan.route, prefix: plan.history.prefix, frames: [], savedBytes: 0,
       overflow: false, invalid: false, attached: false,
     }
     state.capture = capture
     const observeSearch = reportSearch ? collectGoogleSearchEvidence(reportSearch) : undefined
-    return Promise.resolve(response).then(res => observeSseResponse(res, payload => {
-      observeSearch?.(payload)
-      if (capture.overflow) return
-      const frame = responseFrame(payload)
-      if (!frame) return
-      capture.savedBytes += Buffer.byteLength(JSON.stringify(frame))
-      if (capture.savedBytes > replayLimit || capture.frames.length >= candidateLimit) {
-        capture.overflow = true
-        capture.frames.length = 0
-      } else {
-        capture.frames.push(frame)
+    return Promise.resolve(response).then(res => {
+      if (res?.status === 400 && telemetry?.crossModelReplayedTurns > 0
+        && isCurrentOutbound(state, telemetry) && recordsTelemetry(state)) {
+        // A 400 is not proof of signature rejection. Do not inspect the body
+        // or retry: reverting to standard history may itself omit a required
+        // signature in an active function-calling turn.
+        // https://aistudio.google.com/docs/thought-signatures.md?generate-content=true#function-calling
+        publishOutbound(state, { ...telemetry, crossModelHttp400: true })
       }
-    }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } }))
+      return observeSseResponse(res, payload => {
+        observeSearch?.(payload)
+        if (capture.overflow) return
+        const frame = responseFrame(payload)
+        if (!frame) return
+        capture.savedBytes += Buffer.byteLength(JSON.stringify(frame))
+        if (capture.savedBytes > replayLimit || capture.frames.length >= candidateLimit) {
+          capture.overflow = true
+          capture.frames.length = 0
+        } else {
+          capture.frames.push(frame)
+        }
+      }, { frameLimit: nativeFrameLimit, invalid: () => { capture.invalid = true } })
+    })
   }
 
   function installTransport() {
@@ -259,15 +331,13 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
       const plan = planRequest(state, parsed)
       if (!plan) return previous.apply(this, arguments)
       const forwarded = plan.changed ? replaceBody(init, JSON.stringify(plan.body)) : init
-      if (recordsTelemetry(state)) {
-        state.outboundTelemetry = buildOutboundTelemetry(state, plan.body, plan.history)
-        report(state, state.outboundTelemetry)
-      }
+      const telemetry = recordsTelemetry(state) ? buildOutboundTelemetry(state, plan.body, plan.history) : null
+      if (!state.readOnly) publishOutbound(state, telemetry)
       const response = previous.call(this, input, forwarded)
       if (state.readOnly) return response
       const reportSearch = plan.history || (state.googleSearch && hasSearchTool(plan.body.tools))
         ? reportFor?.(state.sessionId) : undefined
-      if (plan.history) return captureResponse(state, response, plan, reportSearch)
+      if (plan.history) return captureResponse(state, response, plan, reportSearch, telemetry)
       return reportSearch ? Promise.resolve(response).then(res => {
         try { return observeGoogleSearchResponse(res, reportSearch) } catch { return res }
       }) : response
@@ -281,21 +351,26 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
 
   ctx.on('llm/stream', (request, next) => {
     let state
-    const eligible = active && request.sessionId !== undefined && isGeminiRoute?.(request.provider) !== false
-    if (eligible && request.purpose === undefined) {
-      const routeCfg = routeConfigOf(config.routes.get(), request.provider)
-      const xhigh = isXHighEnabled?.(request.sessionId) === true && supportsXHighModel(request.model)
-      if (routeCfg.nativeHistory || routeCfg.googleSearch || xhigh) {
+    const hasSession = active && request.sessionId !== undefined
+    const eligible = hasSession && isGeminiRoute?.(request.provider) !== false
+    if (hasSession && request.purpose === undefined) {
+      const routeCfg = eligible ? routeConfigOf(config.routes.get(), request.provider) : undefined
+      const xhigh = eligible && isXHighEnabled?.(request.sessionId) === true && supportsXHighModel(request.model)
+      const intercept = routeCfg?.nativeHistory || routeCfg?.googleSearch || xhigh
+      if (intercept || latestOutbound.has(request.sessionId)) {
         // Use the mounted LLM module's identity predicate, not a second import
         // whose marker WeakSet might belong to a different module generation.
         const isAgentLoopRequest = loopRequestPredicate(ctx)
         if (!isAgentLoopRequest) {
           warnOnce('cannot identify Agent Loop requests on this DSH version; Gemini native transport features remain inactive.')
         } else if (isAgentLoopRequest(request)) {
-          state = {
+          invalidateInteractiveTelemetry(request.sessionId)
+          if (intercept) state = {
             readOnly: false,
             purpose: undefined,
             nativeHistory: routeCfg.nativeHistory,
+            gemini4FamilyReplay: routeCfg.nativeHistory && routeCfg.gemini4FamilyReplay === true
+              && isGemini4FamilyModel(request.model),
             googleSearch: routeCfg.googleSearch,
             xhigh,
             provider: request.provider,
@@ -314,6 +389,11 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
           readOnly: true,
           purpose: 'compaction',
           nativeHistory: routeCfg.nativeHistory,
+          // Read-only compaction has no interactive 400 recovery. A shared
+          // provider ID can still hide incompatible upstream signatures.
+          // https://pydantic.dev/docs/ai/models/google/#switching-between-the-gemini-api-and-google-cloud
+          // https://github.com/router-for-me/CLIProxyAPI/issues/7484
+          gemini4FamilyReplay: false,
           googleSearch: routeCfg.googleSearch,
           xhigh: false,
           provider: request.provider,
@@ -336,24 +416,9 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
       state.url = generationUrl(request.baseURL, request.model)
       state.baseURL = request.baseURL
       if (state.url) installTransport()
-      else if (recordsTelemetry(state)) {
-        report(state, {
-          provider: state.provider,
-          model: state.model,
-          status: 'url-mismatch',
-          totalHistoryTurns: null,
-          replayedHistoryTurns: null,
-          searchConfigured: state.googleSearch,
-          searchInjected: false,
-          searchMode: state.googleSearch ? 'skipped' : 'off',
-          localToolCount: 0,
-          xhighRequested: state.xhigh,
-          xhighApplied: false,
-          thinkingLevel: null,
-          recordedBytes: null,
-          recordedFrames: null,
-          recordStatus: null,
-        })
+      else if (!state.readOnly) {
+        const telemetry = recordsTelemetry(state) ? buildOutboundTelemetry(state, undefined, undefined, 'url-mismatch') : null
+        publishOutbound(state, telemetry)
       }
     }
     return next()
@@ -361,6 +426,7 @@ export function geminiTransport(ctx, config, routeConfigOf, reportFor, isXHighEn
 
   ctx.effect(() => () => {
     active = false
+    latestOutbound.clear()
     // A wrapper installed above ours may still hold it. Never clobber that
     // wrapper; ours becomes a transparent pass-through in its chain.
     if (transport && globalThis.fetch === transport.wrapper) globalThis.fetch = transport.previous
